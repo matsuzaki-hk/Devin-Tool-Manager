@@ -1,116 +1,148 @@
-# Devin-Tool-Manager
+# Devin Tool Manager (DTM)
 
-Devin Desktop (Devin Next) が利用するローカル MCP サーバーと一般 CLI ツール
-(RTK 等) を一元管理し、更新確認→取得→検証→世代別配置→次回起動時適用→復元を行う。
+**Devin Next で使う MCP サーバーや CLI ツールの更新を、安全に確認・準備・適用・復元する Windows 用ツールです。**
 
-仕様: `Devin-Tool-Manager-Specification.md`
+ツールごとに更新元や更新方法が違い、手作業で実行ファイルを置き換えると、起動中の MCP を壊したり、元の版へ戻せなくなったりします。DTM は更新をいったん準備して世代として保存し、ツールを次に起動するときに切り替えます。問題があれば、以前に保存した世代へ戻せます。
+
+[最新版をダウンロード（GitHub Releases）](https://github.com/matsuzaki-hk/Devin-Tool-Manager/releases/latest) ・ [画面の見方](#画面の見方)
+
+## DTMでできること
+
+- Devin に登録されている MCP と、登録した CLI ツールをまとめて一覧表示する
+- MCP の有効／無効を切り替える
+- 接続状態、ツール数、現在の版、更新の有無を確認する
+- 対応した GitHub Releases の更新を確認し、ダウンロード・検証して準備する
+- MCP の実行ファイルを次回起動時に適用する（または適用を試みる）
+- 適用履歴・保存世代を確認し、以前の版へ戻す
+- npm や uv などの管理下にあるツールは、そのパッケージマネージャーの更新機能へ委譲する
+- 診断 ZIP を作成し、問題調査用にログや設定状態をまとめる
+
+DTM は **MCP サーバーや CLI ツールそのものではありません**。たとえば Excel MCP なら、DTM が Excel を操作するのではなく、Excel MCP サーバーの実行ファイルを管理します。ブックの内容を読み書きするのは Excel MCP 側です。
+
+## DTMでできないこと・注意点
+
+- MCP をゼロから探してインストールしたり、必要な設定を自動で作ったりはしません。まず MCP を導入して Devin に登録してください。
+- すべてのツールを自動更新できるわけではありません。更新元や配布ファイルの形式を確認して登録する必要があります。ツール名だけから更新元を推測しません。
+- URL で接続するリモート MCP と Devin カタログ導入の MCP は一覧表示できますが、DTM からサーバー本体を更新しません。
+- `npx` / `uvx` / `uv tool` など外部パッケージマネージャー管理のツールは、実行ファイルを直接置き換えません。対応するものだけ正規のマネージャーへ更新を委譲します。
+- 更新中のツールを強制終了しません。ファイルが使用中なら、適用をそのツールの次回起動まで待たせます。
+- 現行の配布対象は Windows x64 の Devin Next です。macOS、Linux、WSL、SSH、コンテナー内のツールを更新するものではありません。
+- リリースにチェックサムがある場合は照合します。署名（PGP 等）の検証は行わず、チェックサムがない成果物は「未検証」として扱います。
+- DTM が起動前に Devin 全体の更新を一括適用する仕組みではありません。適用は対象ツールの次回起動時に行われます。
 
 ## インストール
 
-配布インストーラ `dtm-setup-<版>.exe` (Inno Setup) を実行すると、
-`dtm.exe` を `%LOCALAPPDATA%\Programs\Devin Next\DevinToolManager\` へ配備し、
-同梱 VSIX を `devin-desktop-next --install-extension` で自動導入する
-(ユーザーモード・管理者権限不要・アンインストーラ付き)。
-ビルド: `powershell -ExecutionPolicy Bypass -File installer\build.ps1`
+1. [DTM の最新版](https://github.com/matsuzaki-hk/Devin-Tool-Manager/releases/latest) を開きます。
+2. `dtm-setup-<版>.exe` をダウンロードして実行します。管理者権限は不要です。
+3. インストーラーが DTM 本体と拡張機能を導入します。Devin Next を再読み込みします。
+4. アクティビティバーの DTM アイコン、またはコマンドパレットの **Devin Tool Manager: 開く** から画面を開きます。
 
-前提: Devin Next と Rust ツールチェーン (ソースからビルドする場合)。
-
-## 構成
-
-| 要素 | 実装 | 場所 |
-|---|---|---|
-| 更新エンジン+ランチャー | `dtm.exe` (Rust 単一バイナリ) | `%LOCALAPPDATA%\Programs\Devin Next\DevinToolManager\` |
-| 管理 UI | VS Code 拡張 (プライマリサイドバー WebviewView) | `~/.devin-next/extensions/local.devin-tool-manager-0.2.0` |
-| 状態/世代データ | JSON + 世代ディレクトリ | `<root>/state`, `<root>/generations` |
-| ソース | Cargo ワークスペース | `crates/dtm-core`, `crates/dtm-cli`, `extension/` |
-
-`dtm.exe` は起動経路そのものとして使われるため、MCP 設定上の `command` は
-`<root>\dtm.exe` + `launch mcpkey:<key>` へ書き換えられる (管理化)。
-`mcpkey` は「設定ファイルパス+サーバー名」のハッシュで、同名サーバーが
-複数プロジェクトにあっても一意に解決される。元設定は `state/managed-mcp.json`
-に保存され管理解除で復元される。
-
-## ルート解決順
-
-1. `--root <path>` / `DTM_ROOT` 環境変数
-2. `dtm.exe` 隣接の `dtm.root` マーカー (インストール配置)
-3. `%LOCALAPPDATA%\Programs\Devin Next\DevinToolManager`
-
-## 基本操作
+拡張だけを個別に入れる場合は、同じリリースの `devin-tool-manager-<版>.vsix` を取得して、次を実行します。
 
 ```powershell
-dtm init                      # ルート初期化
-dtm scan                      # MCP 設定スキャン (user + --project で指定プロジェクト)
-dtm list                      # 管理対象一覧
-dtm add-cli <名> <パス|dir|rel|コマンド名> [--strategy versioned]
-dtm add-rtk [--dir <RTK配置Dir>]  # RTK を初期レシピで登録
-dtm register-mcp <サーバー名> # MCP エントリから installation 登録 (設定は変えない)
-dtm manage <サーバー名>       # mcp_config.json をランチャー経由へ書き換え
-                            #   (直接EXE起動のみ。npx/uvx/スクリプト型は拒否)
-dtm unmanage <サーバー名>     # 元の起動設定へ復元 (--force で競合時も復元優先)
-dtm managed                 # 管理化済みエントリ一覧 (usage key/config/name)
-#   register-mcp/manage/unmanage は --config <設定パス> でプロジェクト/ローカル指定可
-
-dtm check <id|--all>          # 更新確認
-dtm prepare <id>              # 取得・検証・世代作成・版確認 → 適用待ち
-dtm apply <id>                # 有効化 (versioned: ポインタ切替 / fixed-path: 差し替え)
-dtm cancel <id>               # 予約取消 (現在版は変わらない)
-dtm pin <id> [ver|--clear]    # 版固定/解除
-dtm import <id> <file> --version <v>  # 手動成果物取込
-dtm rollback <id> [generation]        # 旧版復元
-dtm preview <id> <zip|dir|exe>        # 配置プレビュー
-dtm set-source <id> <owner/repo> --asset <glob>
-dtm generations|history|status <id>
-dtm logs [--tail N]
-dtm auth github --token <t>   # OS 資格情報ストアへ保存 (env: DTM_GITHUB_TOKEN でも可)
-
-dtm launch <id|mcp:name|mcpkey:key> -- <args>  # ランチャー (stdio/終了コード透過)
-dtm resolve <id|mcp:name|mcpkey:key>           # 起動ファイル実パス解決
+devin-desktop-next --install-extension .\devin-tool-manager-<版>.vsix
 ```
 
-全コマンド `--json` で機械可読出力 (拡張 UI が利用)。
+## 例：日本語対応 Excel MCP を更新管理する
 
-## 拡張機能 (VSIX)
+ここでは [Excel MCP Server 日本語対応フォーク](https://github.com/matsuzaki-hk/excel-mcp-japanese-support) の **スタンドアロン Windows MCP Server** を例にします。Excel MCP の README では、Windows とデスクトップ版 Microsoft Excel 2016 以降が必要です。npm 版ではなく、実行ファイルを直接使う構成にすると、DTM から GitHub Releases の ZIP を使って更新できます。
 
-```powershell
-# 再ビルド・再インストール
-# installer\pack_vsix.py が extension/ を ZIP 化して .vsix を生成する
-python installer\pack_vsix.py devin-tool-manager-x.y.z.vsix
-devin-desktop-next --install-extension devin-tool-manager-x.y.z.vsix
-```
+### 1. Excel MCP を導入して Devin に登録する
 
-Devin 内: アクティビティバーのレンチアイコン、またはコマンドパレット
-`Devin Tool Manager: 開く` → プライマリサイドバーに一覧・操作 UI が出る。
+1. [Excel MCP のリリース一覧](https://github.com/matsuzaki-hk/excel-mcp-japanese-support/releases/latest) から `ExcelMcp-MCP-Server-<版>-windows.zip` をダウンロードします。`ExcelMcp-CLI-...zip`、VSIX、`.mcpb` ではなく **MCP Server の Windows ZIP** を選びます。
+2. ZIP を `C:\Tools\ExcelMcp\` など、移動・削除しない場所へ展開します。展開先に `mcp-excel.exe` があることを確認します。
+3. Devin の MCP 設定でサーバーを登録し、`command` に展開した `mcp-excel.exe` のフルパスを指定します。npm / npx 起動ではなく、実行ファイルを直接指定してください。
+4. Devin で MCP が起動することを確認し、DTM 画面を再読み込みします。MCP が一覧に現れます。
 
-## 状態機械 (仕様 §8)
+### 2. DTM に登録し、更新元を設定する
 
-`source-unset`(更新元未設定) → `checking` → `up-to-date` / `available`
-→ `preparing` → `ready`(適用待ち) → `applying` → `up-to-date`
-+ `waiting-in-use` / `failed` / `unmanaged`(pkg管理下・一覧のみ)
+1. MCP 一覧の Excel MCP 行で **登録** を選びます。これは DTM の一覧へ登録するだけで、MCP 設定はまだ変更しません。
+2. **管理化** を選びます。DTM が Devin の起動設定を DTM ランチャー経由へ切り替え、変更前の設定をバックアップします。更新を次回起動時に適用するには管理化が必要です。管理化後、Devin を再読み込みして MCP の起動を確認します。
+3. Excel MCP の詳細を開き、**更新元設定**に次を指定して保存します。
 
-## 更新元の判定ルール (仕様 §5)
+   | 項目 | 値 |
+   |---|---|
+   | GitHub リポジトリ | `matsuzaki-hk/excel-mcp-japanese-support` |
+   | アセット条件 | `ExcelMcp-MCP-Server-*-windows.zip` |
 
-- GitHub URL 等の根拠ある情報のみ自動取得。名前推測は候補止まり。
-- GitHub 指定だけでは更新不可。アセット条件(1件一致)・配置・版判定が
-  確定して初めて自動更新が有効。
-- npx/uvx 等のパッケージ管理下の実体は直接上書きせず `unmanaged` 表示
-  (第2段階でアダプター委譲)。
-- チェックサム/署名未提供は `unverified` 記録 (成功扱いしない)。
+   この条件は MCP Server の Windows ZIP を選ぶためのものです。CLI、VS Code 拡張、MCPB の配布物は選びません。
 
-## 管理解除
+### 3. 更新する
 
-```powershell
-dtm unmanage <サーバー名>            # 競合なし: 元command/argsへ復元
-dtm unmanage <サーバー名> --force    # 外部編集があっても復元優先
-```
+1. **確認**を押します。現在版と GitHub の最新版を照合します。
+2. 「更新あり」と表示されたら **準備**を押します。ダウンロード進捗が表示され、検証後に新しい版を保存して適用待ちにします。
+3. 対象 MCP が起動中なら、Devin を再読み込み（または対象 MCP を再起動）して次の起動時に適用します。詳細に「次回起動時に更新」と表示されれば予約済みです。
+4. 新版で問題がある場合は **復元**から以前に適用した世代を選びます。復元も対象 MCP の次回起動時に反映される場合があります。
 
-レジストリから installation 自体を外す場合は
-`state/registry.json` の該当エントリを編集する (UI 化は今後)。
+Excel MCP の配布ファイルや設定要件は変更されることがあります。操作前にリンク先のリリース説明も確認してください。
 
-## 既知の制限 (第1段階)
+## 画面の見方
 
-- `applyWhen: all-windows-closed` 未実装 (next-launch / manual のみ)
-- 署名検証 (`.sig`/PGP) は未実装。sha256 チェックサムのみ検証
-- パッケージマネージャアダプター・自動ビルドは第2段階
-- Devin 起動ランチャー (本体起動前の一括適用) は未実装
-- WSL/SSH/コンテナー環境は識別のみ (windows-x64 のみ管理)
+### 一覧のグループ
+
+| グループ | 意味 |
+|---|---|
+| **DTM管理中MCP** | 更新元を設定した MCP、または npm / uv など外部マネージャーへ更新を委譲する MCP |
+| **DTM未管理MCP A** | 更新元が未設定、または現在の形式では更新確認に対応していない MCP |
+| **DTM未管理MCP B** | URL 接続型のリモート MCP。サーバー本体は一覧表示のみで、DTM は変更しません |
+| **DTM未管理MCP C** | Devin カタログ導入の MCP。DTM は更新しません |
+| **CLIツール** | MCP ではない、ユーザーが DTM に登録したコマンドラインツール |
+
+「未管理」は危険・無効という意味ではありません。DTM がサーバー本体を更新しない分類という意味です。Devin カタログ導入かどうかは名前から決めず、導入記録またはユーザーの明示指定で判定します。
+
+### MCP のトグルと丸いインジケーター
+
+- **有効／無効トグル**は Devin の設定上、その MCP を有効にするかどうかです。切り替え前に設定をバックアップします。稼働中 MCP の接続が変わるタイミングは Devin 側の監視・再読み込みに依存します。
+- **丸い接続インジケーター**は更新状態ではなく、Devin のログから読み取った接続状態です。
+
+| 表示 | 意味 |
+|---|---|
+| 緑 | 接続済み |
+| 黄 | 接続中 |
+| 赤 | 接続失敗をログで検出 |
+| 灰 | MCP が無効 |
+| 輪郭だけ／状態不明 | 状態を取得できていない。未接続と断定した表示ではありません |
+
+接続情報はログ更新をもとに再計算します。Devin の再読み込み直後、ログがない場合、リモート MCP などでは状態やツール数を取得できないことがあります。複数ウィンドウのログを併合して表示する場合は近似値になることがあります。
+
+### 版・更新表示
+
+| 表示 | 意味 |
+|---|---|
+| `現在版` | DTM が把握しているインストール済みの版。判定できない場合は「不明」 |
+| `現在版 → 候補版` | 更新確認で見つかった新しい版 |
+| `現在版 → 準備版` / `待機` | 新しい版を取得・検証して保存済み。対象ツールの次回起動を待っている |
+| `最新` | 現在版と確認済みの最新候補が一致 |
+| `更新` / `更新あり` | 更新候補がある。まだ適用済みではありません |
+| `未確認` | 更新確認前、または更新元がないため比較できていない |
+| `—`（ツール数） | ツール数を取得できていない。0個という意味ではありません |
+| `予約: 次回起動時に外部更新を再実行` | 外部パッケージマネージャーの更新がファイル使用中で保留され、次回起動時に再試行する予定 |
+
+接続状態（丸）と更新状態（右側のラベル）は別々の情報です。たとえば赤い丸でも、更新が成功している場合があります。
+
+### 主な操作
+
+| 操作 | 意味 |
+|---|---|
+| **確認** | 現在版と更新元の候補を照合します。通常、実行ファイルは変更しません |
+| **準備** | 成果物を取得・検証・世代保存し、適用を予約します。ダウンロード中は進捗を表示します |
+| **適用** | 準備済みの版を適用します。使用中なら次回起動まで待つことがあります |
+| **取消** | 準備済み更新の適用予約を取り消します。現在版は維持されます |
+| **復元** | 保存済みの以前の版へ戻す準備をします |
+| **外部更新** | npm / uv など登録済みの外部マネージャーの正規更新コマンドを実行します |
+| **登録** | 既存 MCP を DTM の一覧に追加します。Devin の起動設定は変更しません |
+| **管理化** | 起動経路を DTM 経由に切り替え、起動時の適用を可能にします。設定はバックアップされます |
+| **解除** | 管理化で変更した MCP 起動設定を元に戻します |
+| **世代／履歴** | 保存済みの版や過去の操作を確認します |
+| **版固定** | 指定版以外の更新を抑止します |
+| **全件 更新確認／全件 準備** | 対象となる MCP・CLI をまとめて確認／準備します。準備は順番に行われ、外部委譲型は対象外です |
+| **世代整理** | 古い保存世代を整理します。現在版と適用待ちの版は削除対象から保護されます |
+
+CLI ツールには MCP の有効トグルや接続インジケーターはありません。ツール名を開くと更新操作や詳細を確認できます。
+
+## 詳しい仕様と開発者向け情報
+
+- [仕様書](Devin-Tool-Manager-Specification.md)
+- [受け入れ条件](ACCEPTANCE.md)
+- [インストーラーのビルド](installer/build.ps1)（ソースからビルドする場合は Rust、Python、Inno Setup 6 が必要です）
+- ライセンス: [MIT](LICENSE)
