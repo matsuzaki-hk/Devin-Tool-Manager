@@ -2,7 +2,7 @@
 
 評価日：2026-10-07
 
-対象：`C:\Users\avalo\projects\Devin-Tool-Manager`。コード・README・ACCEPTANCE・仕様書の照合、既存テスト実行ファイルの再実行、Webview生成コードの構文検証を実施。プロジェクト、本番MCP設定、RTKの実体、導入済み拡張は変更していない。ソースからの再ビルドとDevin実機UI操作は未実施。
+対象：本リポジトリ（`Devin-Tool-Manager`）。コード・README・ACCEPTANCE・仕様書の照合、既存テスト実行ファイルの再実行、Webview生成コードの構文検証を実施。プロジェクト、本番MCP設定、RTKの実体、導入済み拡張は変更していない。ソースからの再ビルドとDevin実機UI操作は未実施。
 
 ## 総評
 

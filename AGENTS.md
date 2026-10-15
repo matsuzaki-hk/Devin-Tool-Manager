@@ -11,7 +11,7 @@ Devin Desktop (Devin Next) が利用するローカル MCP サーバーと一般
 - OS: Windows 11 / Devin Next `1.126.0-next`（Windsurf=VS Code フォーク）
 - MCP 設定: `%APPDATA%\devin\mcp_config.json`（v3000.3+ 形式、`mcpServers` キー）
 - 拡張機能: `~/.devin-next/extensions` に VSIX 導入可（標準 VS Code 拡張 API + Webview 利用可）
-- 配置先（DTM_ROOT）: `C:\Users\avalo\AppData\Local\Programs\Devin Next\DevinToolManager\`
+- 配置先（DTM_ROOT）: `%LOCALAPPDATA%\Programs\Devin Next\DevinToolManager\`
 - Rust ツールチェーン、Node.js（拡張開発用）が必要
 
 ## 構成
@@ -94,5 +94,5 @@ Devin Desktop (Devin Next) が利用するローカル MCP サーバーと一般
 - `dtm.exe.old-*` 残骸は `run()` 冒頭の `cleanup_old_exe()` が自動回収 (使用中のファイルは削除失敗するだけで無害)。
 - GitHub 公開 (2026-10-15): `github.com/matsuzaki-hk/Devin-Tool-Manager` (PUBLIC, MIT)。リリース `v<版>` に `dtm-setup-<版>.exe` (インストーラ)・`devin-tool-manager-<版>.vsix`・`dtm-<版>-win-x64.zip` (dtm.exe+dtm.root、自己更新用) の3資産を添付する規約。setup.exe は Inno 形式で DTM の成果物適用経路では使えないため、自己更新は必ず zip 資産を指す。
 - DTM 自己管理: `dtm add-cli dtm <dtm.exe絶対パス> --strategy fixed-path` + `set-source matsuzaki-hk/Devin-Tool-Manager --asset "dtm-*-win-x64.zip"` で登録済み (id `8c499cfdbb9593ab174da5586467c900`)。apply は現行 exe を `.dtm-backup/<ts>/` へ rename してから新 exe をコピーするため実行中の自己置換が可能。crates の version はリリース版と一致させること (`dtm --version` = check の版比較基準)。
-- 配布インストーラ (0.4.12): `installer/setup.iss` (Inno Setup 6, `C:\Users\avalo\AppData\Local\Programs\Inno Setup 6\ISCC.exe`)。`installer\build.ps1` が cargo build → pack_vsix.py → payload ステージング → ISCC を一括実行し `installer/dist/dtm-setup-<版>.exe` を生成。版は `extension/package.json` から自動取得 (`-Version` で上書き可)。
+- 配布インストーラ (0.4.12): `installer/setup.iss` (Inno Setup 6, `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`)。`installer\build.ps1` が cargo build → pack_vsix.py → payload ステージング → ISCC を一括実行し `installer/dist/dtm-setup-<版>.exe` を生成。版は `extension/package.json` から自動取得 (`-Version` で上書き可)。
 - インストーラ仕様: ユーザーモード (`PrivilegesRequired=lowest`)、固定パス `{localappdata}\Programs\Devin Next\DevinToolManager` (拡張の candidatePath に一致、ディレクトリ選択不可)。`BeforeInstall` で既存 dtm.exe を `.old-<時刻>` へ退避してから上書き (実行中ロック対策)。`ssPostInstall` で Devin CLI (`{localappdata}\Programs\Devin Next\bin\devin-desktop-next.cmd` → `{autopf}` → `where` の順に探索) を非表示で呼び `--install-extension`。Devin CLI 不在時は拡張のみスキップして手動導入手順を案内。アンインストール時は `--uninstall-extension local.devin-tool-manager` + 導入ファイルのみ削除 (`state/`/`generations/`/`backups/` 等の管理データは温存)。`/VERYSILENT /NORESTART` で無人導入可。実機で導入→アンインストール→再導入の全サイクル検証済み。

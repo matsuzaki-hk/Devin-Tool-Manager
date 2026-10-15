@@ -1,6 +1,6 @@
 import zipfile, os, sys
 
-src = r"C:\Users\avalo\projects\Devin-Tool-Manager\extension"
+src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "extension")
 out = sys.argv[1]
 
 content_types = """<?xml version="1.0" encoding="utf-8"?>
