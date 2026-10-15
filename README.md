@@ -19,7 +19,7 @@ Devin Desktop (Devin Next) が利用するローカル MCP サーバーと一般
 
 | 要素 | 実装 | 場所 |
 |---|---|---|
-| 更新エンジン+ランチャー | `dtm.exe` (Rust 単一バイナリ) | `C:\Users\avalo\AppData\Local\Programs\Devin Next\DevinToolManager\` |
+| 更新エンジン+ランチャー | `dtm.exe` (Rust 単一バイナリ) | `%LOCALAPPDATA%\Programs\Devin Next\DevinToolManager\` |
 | 管理 UI | VS Code 拡張 (プライマリサイドバー WebviewView) | `~/.devin-next/extensions/local.devin-tool-manager-0.2.0` |
 | 状態/世代データ | JSON + 世代ディレクトリ | `<root>/state`, `<root>/generations` |
 | ソース | Cargo ワークスペース | `crates/dtm-core`, `crates/dtm-cli`, `extension/` |
@@ -43,7 +43,7 @@ dtm init                      # ルート初期化
 dtm scan                      # MCP 設定スキャン (user + --project で指定プロジェクト)
 dtm list                      # 管理対象一覧
 dtm add-cli <名> <パス|dir|rel|コマンド名> [--strategy versioned]
-dtm add-rtk                   # RTK を初期レシピで登録 (既定 C:\work\rtk)
+dtm add-rtk [--dir <RTK配置Dir>]  # RTK を初期レシピで登録
 dtm register-mcp <サーバー名> # MCP エントリから installation 登録 (設定は変えない)
 dtm manage <サーバー名>       # mcp_config.json をランチャー経由へ書き換え
                             #   (直接EXE起動のみ。npx/uvx/スクリプト型は拒否)
@@ -74,8 +74,8 @@ dtm resolve <id|mcp:name|mcpkey:key>           # 起動ファイル実パス解�
 
 ```powershell
 # 再ビルド・再インストール
-# C:\work\dtm-vsix 配下: [Content_Types].xml, extension.vsixmanifest, extension/
-# → ZIP 化して .vsix へリネーム
+# installer\pack_vsix.py が extension/ を ZIP 化して .vsix を生成する
+python installer\pack_vsix.py devin-tool-manager-x.y.z.vsix
 devin-desktop-next --install-extension devin-tool-manager-x.y.z.vsix
 ```
 
