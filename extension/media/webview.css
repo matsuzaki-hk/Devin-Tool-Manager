@@ -1,0 +1,200 @@
+:root {
+  --fg: var(--vscode-foreground);
+  --bd: var(--vscode-panel-border);
+  --accent: var(--vscode-button-background);
+}
+body {
+  font-family: var(--vscode-font-family);
+  color: var(--fg);
+  padding: 8px;
+  font-size: 12px;
+}
+h3 {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin: 14px 0 6px;
+  padding: 4px 6px;
+  border-left: 3px solid var(--accent);
+  background: var(--vscode-sideBarSectionHeader-background, rgba(127, 127, 127, 0.15));
+  color: var(--vscode-sideBarSectionHeader-foreground, var(--fg));
+  text-transform: none;
+}
+h3 .count {
+  font-weight: 400;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+.toolbar {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+  /* スクロールしても常時表示 */
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: 4px 0;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+/* 末尾の Devin 操作バー: sticky ではなく通常フロー + 上辺で区切る */
+.toolbar.footer {
+  position: static;
+  border-top: 1px solid var(--bd);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+.card {
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 6px 0;
+}
+.card-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.badge {
+  font-size: 10px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  padding: 0 6px;
+  opacity: 0.8;
+}
+.badge.pin { border-color: var(--vscode-charts-orange); color: var(--vscode-charts-orange); }
+.ver { margin-top: 2px; }
+.btns { margin-top: 4px; }
+.detail {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--bd);
+  word-break: break-all;
+}
+.detail-btns { margin-top: 4px; display: flex; flex-wrap: wrap; }
+.scan-row {
+  border-bottom: 1px solid var(--bd);
+  padding: 5px 2px;
+}
+h4 { font-size: 11px; font-weight: 500; margin: 10px 0 4px; }
+.mcp-entry { border-bottom: 1px solid var(--bd); }
+.mcp-line { display: grid; grid-template-columns: 28px 8px minmax(0, 1fr) 40px 64px 32px; align-items: center; gap: 4px; min-height: 30px; }
+.cli-line { display: grid; grid-template-columns: minmax(0, 1fr) 64px 32px; align-items: center; gap: 4px; min-height: 30px; }
+.mcp-line .row-name, .cli-line .row-name { background: transparent; color: var(--fg); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 0; font-size: 12px; min-width: 0; }
+.enabled-state { font-size: 10px; text-align: center; border-radius: 8px; padding: 2px 0; }
+.enabled-state.on { background: #2e7d32; color: #fff; border: 1px solid #2e7d32; }
+.enabled-state.off { background: #616161; color: #fff; border: 1px solid #616161; }
+.connection { width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; }
+.connection.unknown { border: 1px solid var(--vscode-descriptionForeground); }
+.connection.disabled { background: var(--vscode-descriptionForeground); }
+.connection.connected { background: #2e7d32; }
+.connection.connecting { background: #f9a825; }
+.connection.error { background: #c62828; }
+.mcp-tools, .mcp-version, .mcp-update, .cli-version { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.mcp-detail { padding: 6px 4px 10px; font-size: 11px; overflow-wrap: anywhere; }
+.mcp-detail .card-head { display: none; }
+.scan-scope { margin-top: 10px; }
+@media (max-width: 280px) {
+  .mcp-version { display: none; }
+  .mcp-line { grid-template-columns: 28px 8px minmax(0, 1fr) 40px 32px; }
+}
+@media (max-width: 220px) {
+  .mcp-tools { display: none; }
+  .mcp-line { grid-template-columns: 28px 8px minmax(0, 1fr) 32px; }
+}
+@media (max-width: 180px) {
+  .cli-version { display: none; }
+  .cli-line { grid-template-columns: minmax(0, 1fr) 32px; }
+}
+button {
+  background: var(--accent);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 3px;
+  padding: 2px 8px;
+  margin: 1px 1px 1px 0;
+  cursor: pointer;
+  font-size: 11px;
+}
+button.sec {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+button:disabled { opacity: 0.4; cursor: default; }
+.mono { font-family: var(--vscode-editor-font-family); font-size: 11px; }
+.muted { opacity: 0.65; }
+.small { font-size: 10px; }
+.err { color: var(--vscode-errorForeground); }
+.ok { color: var(--vscode-testing-iconPassed); }
+.warn { color: var(--vscode-editorWarning-foreground); }
+.progress-row { display: flex; align-items: center; gap: 6px; }
+progress.dl { flex: 1; min-width: 40px; height: 6px; }
+#log { white-space: pre-wrap; max-height: 200px; overflow: auto; opacity: 0.85; }
+/* ヘルプパネル */
+.help { font-size: 11px; line-height: 1.5; }
+.help-h { font-weight: 600; margin: 8px 0 2px; }
+.help-t { border-collapse: collapse; width: 100%; }
+.help-t th, .help-t td {
+  border: 1px solid var(--bd);
+  padding: 2px 6px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 10px;
+}
+.help-t th { background: var(--vscode-sideBarSectionHeader-background); }
+.help-ul { margin: 2px 0; padding-left: 16px; }
+.help-ul li { margin: 2px 0; }
+#toast {
+  position: fixed;
+  bottom: 10px;
+  right: 10px;
+  left: 10px;
+  background: var(--vscode-notifications-background);
+  border: 1px solid var(--bd);
+  padding: 6px 10px;
+  border-radius: 4px;
+  display: none;
+}
+#toast.show { display: block; }
+.form {
+  margin-top: 6px;
+  padding: 6px;
+  border: 1px dashed var(--bd);
+  border-radius: 4px;
+}
+.form input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 3px 0;
+  padding: 3px 6px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--bd));
+  border-radius: 3px;
+  font-size: 11px;
+}
+/* 参照ボタン付き入力欄: input + ボタンを1行に */
+.frow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.frow input {
+  flex: 1;
+  min-width: 0;
+}
+.browse-btn {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 6px;
+  margin: 3px 0;
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+/* 実行結果をボタン右側にインライン表示 (エラー赤/正常緑、入力値は保持) */
+.form-result {
+  font-size: 10px;
+  word-break: break-all;
+  flex: 1;
+}

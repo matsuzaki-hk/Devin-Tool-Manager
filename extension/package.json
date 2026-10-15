@@ -1,0 +1,74 @@
+{
+  "name": "devin-tool-manager",
+  "displayName": "Devin Tool Manager",
+  "description": "MCP サーバーと CLI ツールの更新管理 (dtm.exe の Webview UI)",
+  "version": "0.4.12",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:dtm.manager"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dtm",
+          "title": "Devin Tool Manager",
+          "icon": "media/dtm.svg"
+        }
+      ]
+    },
+    "views": {
+      "dtm": [
+        {
+          "type": "webview",
+          "id": "dtm.manager",
+          "name": "ツール管理"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dtm.open",
+        "title": "Devin Tool Manager: 開く",
+        "category": "DTM"
+      },
+      {
+        "command": "dtm.refresh",
+        "title": "Devin Tool Manager: 再読み込み",
+        "category": "DTM"
+      },
+      {
+        "command": "dtm.diagnoseMcp",
+        "title": "Devin Tool Manager: MCP連携診断（読み取り専用）",
+        "category": "DTM"
+      }
+    ],
+    "configuration": {
+      "title": "Devin Tool Manager",
+      "properties": {
+        "dtm.path": {
+          "type": "string",
+          "default": "",
+          "description": "dtm.exe のパス (空の場合は DTM_ROOT\\dtm.exe → インストール既定 → PATH の順に探索)"
+        },
+        "dtm.root": {
+          "type": "string",
+          "default": "",
+          "description": "DTM ルート (既定: dtm.exe 側の自動解決)"
+        },
+        "dtm.projectDirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "開いているワークスペースに追加して読むプロジェクトルート。ユーザー設定も読み取ります。PC全体は探索しません。"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+target/
+*.vsix
+node_modules/
+out/
+.devin/mcp_config.local.json
+installer/payload/
+installer/dist/
+.serena/
+.playwright-mcp/
+workdtm-dev/
+.dtm-ui-test.html
+
