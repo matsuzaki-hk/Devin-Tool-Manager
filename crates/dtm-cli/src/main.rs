@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use dtm_core::models::*;
-use dtm_core::{discover, mcpcfg, ops, paths, register, stage, Store};
+use dtm_core::{discover, mcpcfg, ops, paths, probe, register, stage, Store};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -91,6 +91,31 @@ enum Cmd {
     },
     /// 管理化済み MCP エントリ一覧 (usage key / config / server)
     Managed,
+    /// MCP サーバーへ短命接続し tools/list でツール数を取得 (stdio 型のみ。
+    /// 結果は state/mcp-probe-cache.json にキャッシュ)
+    ProbeMcp {
+        server_name: String,
+        /// 設定ファイルパス (既定: ユーザースコープ)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// プローブ全体の上限秒
+        #[arg(long, default_value = "25")]
+        timeout: u64,
+        /// キャッシュを使わず実プローブする
+        #[arg(long)]
+        no_cache: bool,
+    },
+    /// MCP プローブキャッシュの内容を JSON 出力 (拡張の表示用)
+    ProbeCache,
+    /// 登録解除: registry・状態・世代を削除 (実ファイルは消さない。
+    /// 管理化済み MCP は unmanage 先行が必要)
+    Remove {
+        /// 対象 (id | name)
+        id: String,
+        /// 管理化済み MCP でも強制的に登録解除 (Devin設定は mcpkey: を指したまま残る)
+        #[arg(long)]
+        force: bool,
+    },
     /// 更新確認
     Check {
         /// 対象 (省略時は --all 必須)
@@ -758,6 +783,55 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
                 if map.entries.is_empty() {
                     println!("管理化済み MCP はありません");
                 }
+            }
+        }
+        Cmd::ProbeMcp {
+            server_name,
+            config,
+            timeout,
+            no_cache,
+        } => {
+            let cfg_path = config.map(Ok).unwrap_or_else(discover::user_config_path)?;
+            let o = probe::probe_server(store, &cfg_path, &server_name, timeout, no_cache)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&o)?);
+            } else {
+                let tools = o.tools.map(|t| t.to_string()).unwrap_or_else(|| "-".into());
+                println!(
+                    "{}: tools={} ver={}{}",
+                    o.server_name,
+                    tools,
+                    o.server_version.as_deref().unwrap_or("-"),
+                    o.error
+                        .as_ref()
+                        .map(|e| format!("  error={e}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        Cmd::ProbeCache => {
+            let cache = probe::load_cache(&store.layout);
+            println!("{}", serde_json::to_string_pretty(&cache)?);
+        }
+        Cmd::Remove { id, force } => {
+            let inst = store.find_installation(&id)?;
+            let o = ops::remove(store, &inst, force)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "message": format!("登録解除: {}", o.name),
+                        "removed": o.name,
+                        "removedManagedEntries": o.removed_managed_entries,
+                        "warnings": o.warnings,
+                    })
+                );
+            } else {
+                println!("登録解除: {}", o.name);
+            }
+            for w in o.warnings {
+                eprintln!("警告: {w}");
             }
         }
         Cmd::Check { id, all } => {

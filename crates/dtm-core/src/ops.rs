@@ -1141,6 +1141,102 @@ pub fn cleanup_generations(
     Ok(out)
 }
 
+// ---------- 登録解除 ----------
+
+pub struct RemoveOutcome {
+    pub name: String,
+    pub warnings: Vec<String>,
+    /// 消去した managed-mcp エントリ数 (force 時のみ >0)
+    pub removed_managed_entries: usize,
+}
+
+/// 登録解除: registry・状態・世代・管理マッピング・一時ファイルを削除する。
+/// 実ファイル (fixed_path 元実体・install_root 配下のユーザーファイル) は削除しない。
+/// `manage` で設定書き換え済みの MCP は Devin が `dtm launch mcpkey:` を呼び続けるため
+/// `unmanage` 先行を要求する (--force で登録のみ強制削除 + 警告)。
+pub fn remove(store: &Store, inst: &Installation, force: bool) -> Result<RemoveOutcome> {
+    let lock = InstallationLock::try_acquire(&store.layout, &inst.id)?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let mut map = store.load_managed_map()?;
+    let managed_names: Vec<String> = map
+        .entries
+        .iter()
+        .filter(|e| e.installation_id == inst.id)
+        .map(|e| e.server_name.clone())
+        .collect();
+    if !managed_names.is_empty() && !force {
+        return Err(Error::Config(format!(
+            "'{}' は管理化済み MCP ({}) です。先に `dtm unmanage` で設定を元に戻してください (登録だけ強制削除する場合は --force)",
+            inst.name,
+            managed_names.join(", ")
+        )));
+    }
+    let mut removed_managed_entries = 0usize;
+    if !managed_names.is_empty() {
+        warnings.push(format!(
+            "管理化済みの MCP 設定 ({}) は `dtm launch mcpkey:` を指したまま残ります。Devin 側の起動は失敗するため、設定の復元または `dtm unmanage` が別途必要です",
+            managed_names.join(", ")
+        ));
+        removed_managed_entries = managed_names.len();
+        map.entries.retain(|e| e.installation_id != inst.id);
+        store.save_managed_map(&map)?;
+    }
+    // 登録のみ (manage 未実行) の MCP 利用元: 設定は無変更なので直接起動は継続するが
+    // 更新追跡は外れることを明示する
+    let registered: Vec<String> = inst
+        .usages
+        .iter()
+        .filter_map(|u| match u {
+            UsageRef::McpServer { server_name, .. } => Some(server_name.clone()),
+            _ => None,
+        })
+        .filter(|n| !managed_names.contains(n))
+        .collect();
+    if !registered.is_empty() {
+        warnings.push(format!(
+            "MCP ({}) の更新追跡を解除しました (設定は無変更のため Devin 側の起動は継続します)",
+            registered.join(", ")
+        ));
+    }
+
+    let id = &inst.id;
+    for p in [
+        store.layout.install_state_file(id),
+        store.layout.job_file(id),
+        store.layout.progress_file(id),
+    ] {
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    if store.layout.generations_base(id).exists() {
+        std::fs::remove_dir_all(store.layout.generations_base(id))?;
+    }
+    // staging 残骸 <id>-*
+    if let Ok(rd) = std::fs::read_dir(store.layout.staging_dir()) {
+        let prefix = format!("{id}-");
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    store.update_registry(|reg| {
+        reg.installations.retain(|i| i.id != inst.id);
+        Ok(())
+    })?;
+    // ガード解放後にロックファイルを消す (自プロセス保持中は削除できない)
+    drop(lock);
+    let _ = std::fs::remove_file(store.layout.lock_file(id));
+    crate::dlog!("remove: {} ({}) 登録解除", inst.name, inst.id);
+    Ok(RemoveOutcome {
+        name: inst.name.clone(),
+        warnings,
+        removed_managed_entries,
+    })
+}
+
 /// ディレクトリ配下の合計バイト数 (ベストエフォート)
 fn dir_size(p: &Path) -> u64 {
     let mut total = 0;

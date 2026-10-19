@@ -6,11 +6,17 @@
 //     … エディタ側 MCP ホストの接続イベント
 //       「MCP server '<name>' connected successfully」→ 接続済み
 //       「connection failed」→ 失敗 / 「Connecting to …」のみ→ 接続中
-//   <logs>/<session>/window<N>/exthost/codeium.windsurf/Devin.log
+//   <logs>/<session>/window<N>/exthost/codeium.windsurf/Devin.log (旧形式)
 //     … devin-cli エージェント側 MCP クライアント (mcp-go)
 //       「Server '<key>' initialized successfully: <表示名> v<版>」→ 稼働版
 //       直後の {"result":{"tools":[…]}} 応答 → 実ツール数
 //       「All connection methods failed for <url>」→ URL 接続の失敗
+//   <logs>/<session>/window<N>/exthost/output_logging_*/N-Devin ACP devin-cli.log (新形式 1.126+)
+//     … ACP エージェント (chisel/toolbox) の MCP 接続イベント
+//       「MCP server '<name>' connected successfully」→ 接続済み
+//       「MCP server '<name>' connection failed: …」→ 失敗
+//       「Connecting to/Starting … MCP server '<name>'」→ 接続中
+//     ※ 新形式には tools/list 応答が無いためツール数は dtm probe-mcp 由来
 //
 // ウィンドウ特定: activate 時に診断チャネルへ書き込んだ marker を
 //   output_logging_*/*DTM*.log から検索し、所在する window<N> を特定する。
@@ -20,6 +26,7 @@ const fs = require("fs");
 const path = require("path");
 
 const LOG_TS = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+/;
+const ACP_TS = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z/;
 const LINE_CAP = 256 * 1024;   // MCP <name>.log 用の末尾読み取り上限
 const AGENT_CAP = 2 * 1024 * 1024; // Devin.log は大きいため広めに読む
 
@@ -74,7 +81,7 @@ function findExthostDirs(sessionDir, marker) {
           try {
             const text = fs.readFileSync(path.join(od.dir, file), "utf8");
             if (marker && text.includes(marker)) {
-              out.dirs = [{ exthost, cutoff: all[all.length - 1].cutoff }];
+              out.dirs = [all[all.length - 1]];
               out.approx = false;
               out.cutoff = all[all.length - 1].cutoff;
               return out;
@@ -86,7 +93,7 @@ function findExthostDirs(sessionDir, marker) {
   } catch (_) {
     return out;
   }
-  out.dirs = all.map((entry) => ({ exthost: entry.exthost, cutoff: entry.cutoff }));
+  out.dirs = all;
   return out;
 }
 
@@ -213,8 +220,63 @@ function parseAgentLog(file, cutoff, remoteNames) {
   return result;
 }
 
+function acpLineTs(line) {
+  const m = line.match(ACP_TS);
+  if (!m) return null;
+  const t = Date.parse(m[1] + "Z");
+  return Number.isFinite(t) ? t : null;
+}
+
+// 新形式 (1.126+) のエージェントログ: output_logging_*/N-Devin ACP devin-cli.log
+// server="..." 属性と 'name' 表記の両方が同じ設定キー名を指す。
+// tools/list 応答は含まれないためツール数は得られない (probe に委譲)。
+// return { events: {name: {state, ts, error}} }
+function parseAcpAgentLog(file, cutoff) {
+  const events = {};
+  const upd = (name, ev) => {
+    const prev = events[name];
+    if (!prev || (ev.ts || 0) >= (prev.ts || 0)) events[name] = ev;
+  };
+  for (const line of tailLines(file, AGENT_CAP)) {
+    if (!line.includes("MCP")) continue;
+    const ts = acpLineTs(line);
+    if (ts == null || (cutoff && ts < cutoff)) continue;
+    let m = line.match(/MCP server '([^']+)' connected successfully/);
+    if (m) {
+      upd(m[1], { state: "connected", ts });
+      continue;
+    }
+    m = line.match(/MCP server '([^']+)' connection failed:?\s*(.*)/);
+    if (m) {
+      upd(m[1], { state: "error", ts, error: (m[2] || "").trim().slice(0, 160) });
+      continue;
+    }
+    m = line.match(/Connecting to (?:streamable HTTP |legacy SSE |SSE )?MCP server '([^']+)'/);
+    if (!m) m = line.match(/Starting stdio MCP server '([^']+)'/);
+    if (m) upd(m[1], { state: "connecting", ts });
+  }
+  return events;
+}
+
+// output_logging_* ディレクトリ群から最新の devin-cli ACP ログを探す。
+// ディレクトリは birth 昇順 (末尾が最新)。最新側から最初にファイルが
+// 存在するものを返す (最新が空/クラッシュ時は直前を利用)。
+function newestAcpLog(outputs) {
+  for (let i = outputs.length - 1; i >= 0; i--) {
+    let files = [];
+    try { files = fs.readdirSync(outputs[i].dir); } catch (_) { continue; }
+    for (const f of files) {
+      if (/^\d+-Devin ACP devin-cli\.log$/.test(f)) {
+        return path.join(outputs[i].dir, f);
+      }
+    }
+  }
+  return null;
+}
+
 // servers: [{ name, configPath, kind, command, disabled }]
-// return { approx, byKey: { "<configPath|name>": { state, via, version, tools, error } } }
+// opts.probeCache: {entries: [{serverName, configPath, tools, serverVersion, error}]} (任意)
+// return { approx, byKey: { "<configPath|name>": { state, via, version, tools, toolsVia, error } } }
 function collect(opts) {
   const empty = { approx: true, byKey: {} };
   try {
@@ -225,7 +287,7 @@ function collect(opts) {
     const found = findExthostDirs(sessionDir, opts.marker);
     if (!found.dirs.length) return empty;
     const extByName = {};   // name → {state, ts, error}
-    const agent = { initialized: {}, toolCounts: {}, urlFailures: [] };
+    const agent = { initialized: {}, toolCounts: {}, urlFailures: [], events: {} };
     const remoteNames = new Set((opts.servers || [])
       .filter((s) => s.kind === "McpRemote").map((s) => s.name));
     for (const entry of found.dirs) {
@@ -248,15 +310,37 @@ function collect(opts) {
       }
       Object.assign(agent.toolCounts, a.toolCounts);
       agent.urlFailures.push(...a.urlFailures);
+      // 新形式 ACP エージェントログ (1.126+): 接続状態イベント (最新イベント優先)
+      const acpLog = newestAcpLog(entry.outputs || []);
+      if (acpLog) {
+        for (const [key, ev] of Object.entries(parseAcpAgentLog(acpLog, entry.cutoff))) {
+          const prev = agent.events[key];
+          if (!prev || (ev.ts || 0) >= (prev.ts || 0)) agent.events[key] = ev;
+        }
+      }
     }
     const byKey = {};
     const keyOf = (server) => opts.keyOf
       ? opts.keyOf(server) : `${server.configPath}|${server.name}`;
+    // dtm probe-mcp のキャッシュ (keyOf と同じ正規化で照合する)
+    const probeByKey = {};
+    for (const e of (opts.probeCache && opts.probeCache.entries) || []) {
+      if (e.error == null && e.tools != null) {
+        probeByKey[keyOf({ configPath: e.configPath, name: e.serverName })] = e;
+      }
+    }
     for (const server of opts.servers || []) {
-      const entry = { state: "unknown", via: null, version: null, tools: null, error: null };
+      const entry = { state: "unknown", via: null, version: null, tools: null, toolsVia: null, error: null };
       const url = server.kind === "McpRemote" && server.command
         ? String(server.command).replace(/\/+$/, "") : null;
-      if (agent.initialized[server.name]) {
+      if (agent.events[server.name]) {
+        // 新形式 (1.126+): ACP エージェントの接続イベント (版情報は含まれない)
+        const ev = agent.events[server.name];
+        entry.state = ev.state;
+        entry.via = "agent";
+        entry.error = ev.error || null;
+      } else if (agent.initialized[server.name]) {
+        // 旧形式: 初期化成功 = 接続済み + 稼働版 + ツール数
         entry.state = "connected";
         entry.via = "agent";
         entry.version = agent.initialized[server.name].version;
@@ -271,6 +355,15 @@ function collect(opts) {
         entry.via = "exthost";
         entry.error = ev.error;
       }
+      // ツール数: 旧形式の tools/list 応答が無い場合はプローブキャッシュを使う
+      if (entry.tools == null) {
+        const hit = probeByKey[keyOf(server)];
+        if (hit) {
+          entry.tools = hit.tools;
+          entry.toolsVia = "probe";
+          if (!entry.version && hit.serverVersion) entry.version = hit.serverVersion;
+        }
+      }
       byKey[keyOf(server)] = entry;
     }
     return { approx: found.approx, byKey };
@@ -279,15 +372,27 @@ function collect(opts) {
   }
 }
 
-// fs.watch 用: 有効セッション内の codeium.windsurf ディレクトリ一覧
+// fs.watch 用: 有効セッション内の codeium.windsurf + output_logging_* ディレクトリ一覧
+// (ACP エージェントログは output_logging_* 配下に書かれるため両方を監視する)
 function windsurfDirs(logsRoot) {
   const sessionDir = newestSessionDir(logsRoot || path.join(process.env.APPDATA || "", "Devin - Next", "logs"));
   if (!sessionDir) return [];
   try {
-    return fs.readdirSync(sessionDir, { withFileTypes: true })
-      .filter((w) => w.isDirectory() && w.name.startsWith("window"))
-      .map((w) => path.join(sessionDir, w.name, "exthost", "codeium.windsurf"))
-      .filter((dir) => fs.existsSync(dir));
+    const out = [];
+    for (const w of fs.readdirSync(sessionDir, { withFileTypes: true })) {
+      if (!w.isDirectory() || !w.name.startsWith("window")) continue;
+      const exthost = path.join(sessionDir, w.name, "exthost");
+      const wind = path.join(exthost, "codeium.windsurf");
+      if (fs.existsSync(wind)) out.push(wind);
+      try {
+        for (const d of fs.readdirSync(exthost, { withFileTypes: true })) {
+          if (d.isDirectory() && d.name.startsWith("output_logging_")) {
+            out.push(path.join(exthost, d.name));
+          }
+        }
+      } catch (_) { /* ignore */ }
+    }
+    return out;
   } catch (_) {
     return [];
   }

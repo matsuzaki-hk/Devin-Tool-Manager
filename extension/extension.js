@@ -73,14 +73,60 @@ function runDtm(args, timeoutMs = 30000) {
 let lastState = { installations: [], scan: [], managed: [], log: [], busy: [] };
 const inFlight = new Set(); // "cmd:id" — 処理中操作の重複抑制用
 let liveMarker = ""; // このウィンドウの exthost を特定するための marker
+let probeCache = null;          // dtm probe-cache (mcp-probe-cache.json) の内容
+const probeTried = new Set();   // この拡張セッションで試行したサーバー (重複プローブ防止)
+const probeQueue = [];
+let probeRunning = false;
 
 // Devin ログ解析による実行時状態 (接続・稼働版・実ツール数)
+// ツール数は新形式ログに無いため dtm probe-mcp キャッシュを併用する
 function computeLive() {
   return livestate.collect({
     marker: liveMarker,
     servers: lastState.scan || [],
     keyOf: (s) => catalog.key(s.configPath, s.name),
+    probeCache,
   });
+}
+
+// tools が未取得の stdio MCP を順にプローブする (1回/セッション/サーバー。
+// 手動「再読み込み」では probeTried を消して再試行させる)
+function scheduleProbes(provider) {
+  const live = lastState.mcpLive;
+  if (!live || !live.byKey || lastState.dtmError) return;
+  for (const s of lastState.scan || []) {
+    if (!s || s.disabled || s.stale || s.kind === "McpRemote") continue;
+    const key = catalog.key(s.configPath, s.name);
+    const entry = live.byKey[key];
+    if (!entry || entry.tools != null || probeTried.has(key)) continue;
+    probeTried.add(key);
+    probeQueue.push({ name: s.name, configPath: s.configPath });
+  }
+  drainProbeQueue(provider);
+}
+
+async function drainProbeQueue(provider) {
+  if (probeRunning) return;
+  probeRunning = true;
+  try {
+    while (probeQueue.length) {
+      const t = probeQueue.shift();
+      const args = ["probe-mcp", t.name, "--timeout", "25"];
+      if (t.configPath) args.push("--config", t.configPath);
+      const r = await runDtm(args, 45000);
+      // 成否に関わらずキャッシュを再読込 (失敗も error 付きで記録される)
+      if (r.ok) {
+        const c = await runDtm(["probe-cache"]);
+        if (c.ok && c.value && Array.isArray(c.value.entries)) {
+          probeCache = c.value;
+        }
+        lastState.mcpLive = computeLive();
+        provider.post(lastState);
+      }
+    }
+  } finally {
+    probeRunning = false;
+  }
 }
 
 let refreshTask = null;
@@ -113,11 +159,12 @@ async function refreshState(provider) {
   const roots = [...new Set((cfg.get("projectDirs") || [])
     .concat((vscode.workspace.workspaceFolders || []).map((folder) => folder.uri.fsPath)))];
   const projects = roots.flatMap((p) => ["--project", p]);
-  const [list, scan, managed, logs] = await Promise.all([
+  const [list, scan, managed, logs, probe] = await Promise.all([
     runDtm(["list"]),
     runDtm(["scan", "--diagnostics", ...projects]),
     runDtm(["managed"]),
     runDtm(["logs", "--tail", "30"]),
+    runDtm(["probe-cache"]),
   ]);
   const scanErrors = scan.ok && scan.value && Array.isArray(scan.value.errors)
     ? scan.value.errors : [{ message: scan.stderr || "MCP設定スキャンに失敗しました" }];
@@ -150,8 +197,12 @@ async function refreshState(provider) {
     busy: [...inFlight],
     updatedAt: new Date().toISOString(),
   };
+  if (probe.ok && probe.value && Array.isArray(probe.value.entries)) {
+    probeCache = probe.value;
+  }
   lastState.mcpLive = computeLive();
   provider.post(lastState);
+  scheduleProbes(provider);
 }
 
 /** webview のインラインフォームから送られた fields を CLI 引数へ変換する */
@@ -253,6 +304,7 @@ async function action(provider, msg) {
     "register-mcp": ["register-mcp", msg.id],
     manage: ["manage", msg.id],
     unmanage: ["unmanage", msg.id],
+    remove: ["remove", msg.id],
     "pm-sync": ["pm-sync", msg.id],
     "set-mcp-enabled": ["set-mcp-enabled", msg.id, "--enabled", String(msg.enabled),
       "--expected-disabled", String(toggleRow && toggleRow.scan.disabled)],
@@ -265,6 +317,18 @@ async function action(provider, msg) {
     args = argsFromFields(msg);
   }
   if (!args) return;
+  // 登録解除は registry・状態・世代を消すため実行前にモーダル確認する
+  // (実ファイルは削除されない。管理化済み MCP は dtm 側が拒否する)
+  if (msg.cmd === "remove") {
+    try {
+      const target = (lastState.installations || []).find((i) => i.id === msg.id);
+      const label = target ? target.name : msg.id;
+      const ok = await vscode.window.showWarningMessage(
+        `'${label}' を DTM から登録解除します。登録・状態・保存世代を削除します (ツール実体のファイルは削除されません)。`,
+        { modal: true }, "登録解除");
+      if (ok !== "登録解除") return;
+    } catch (_) { /* テストVMに showWarningMessage が無い場合は確認をスキップ */ }
+  }
   const longOps = ["prepare", "prepare-all", "check", "check-all", "rollback", "import", "pm-sync"];
   inFlight.add(key);
   provider.post({ busy: [...inFlight] });
@@ -429,6 +493,8 @@ class DtmViewProvider {
 </body></html>`;
     view.webview.onDidReceiveMessage(async (msg) => {
       if (msg.type === "ready" || msg.type === "refresh") {
+        // 手動再読み込みではプローブ再試行を許可 (失敗したサーバーも再取得)
+        if (msg.type === "refresh") probeTried.clear();
         await refresh(this);
       } else if (msg.type === "reload") {
         // ウィンドウ再読み込み = 拡張ホスト再起動 + MCP サーバー再起動。

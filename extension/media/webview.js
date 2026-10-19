@@ -273,6 +273,8 @@ function instCard(i, embedded) {
             + btn("generations", i.id, "世代", { sec: 1, tip: "保存済み世代 (ロールバック候補) の一覧を表示します" })
             + btn("cleanup", i.id, "世代整理", { sec: 1, tip: "保持世代数を超える旧世代を削除します (現行・適用待ちは保護)" }))
       + btn("history", i.id, "履歴", { sec: 1, tip: "操作イベント履歴を表示します" })
+      + btn("remove", i.id, "登録解除", { sec: 1,
+          tip: "DTM の登録・状態・世代を削除します (ツール実体のファイルは消えません)。管理化済み MCP は先に「解除」(unmanage) が必要です" })
       + "</div>"
       + (formState && formState.id === i.id && FORMS[formState.cmd]
           ? formHtml(formState.cmd, i.id) : "")
@@ -460,8 +462,10 @@ function mcpRow(row) {
   const toolCount = live && live.tools != null ? live.tools : null;
   const toolsText = toolCount != null ? String(toolCount) : "—";
   const toolsTitle = toolCount != null
-    ? "Devinエージェントがサーバーから取得した実ツール数"
-    : "ツール数は未取得（Devin側ログに tools/list 応答がありません）";
+    ? (live && live.toolsVia === "probe"
+        ? "DTM が短命プローブ (initialize+tools/list) で取得したツール数"
+        : "Devinエージェントがサーバーから取得した実ツール数")
+    : "ツール数は未取得（リモート/無効/プローブ未成功のため取得不能）";
   const version = current + (i && i.prepared ? " → " + i.prepared
     : i && (i.status || "").startsWith("更新あり") && i.candidate ? " → " + i.candidate : "");
   const update = row.category ? row.category : i && i.prepared ? "待機" : i && (i.status || "").startsWith("更新あり") ? "更新"

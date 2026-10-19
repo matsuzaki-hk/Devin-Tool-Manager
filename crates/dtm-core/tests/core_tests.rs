@@ -566,3 +566,83 @@ fn prune_candidates_protects_active_and_prepared() {
     names2.sort();
     assert_eq!(names2, vec!["g2", "g3"]);
 }
+
+// ---------- 登録解除 (remove) ----------
+
+#[test]
+fn remove_cli_installation_cleans_state_and_registry() {
+    let root = tempfile::tempdir().unwrap();
+    let store =
+        dtm_core::Store::open(dtm_core::paths::Layout::new(root.path().to_path_buf())).unwrap();
+    let iid = "iid-remove-test";
+    let mut inst = fixture_inst(iid, root.path());
+    inst.usages.push(UsageRef::Cli {
+        via: "abs-path".into(),
+        specifier: "C:\tool.exe".into(),
+    });
+    store.upsert_installation(inst.clone()).unwrap();
+    mk_gen(root.path(), iid, "gen-a", "1.0.0", true, true);
+    store
+        .update_state::<()>(iid, |st| {
+            st.active_generation = Some("gen-a".into());
+        })
+        .unwrap();
+
+    let o = dtm_core::ops::remove(&store, &inst, false).unwrap();
+    assert_eq!(o.name, "t");
+    assert!(o.warnings.is_empty());
+
+    // registry・状態・世代・ジョブが消え、検索も失敗する
+    assert!(store.load_registry().unwrap().installations.is_empty());
+    assert!(!root
+        .path()
+        .join("state")
+        .join("installations")
+        .join(format!("{iid}.json"))
+        .exists());
+    assert!(!root.path().join("generations").join(iid).exists());
+    assert!(matches!(
+        store.find_installation("t"),
+        Err(dtm_core::Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn remove_refuses_managed_mcp_without_force() {
+    let root = tempfile::tempdir().unwrap();
+    let store =
+        dtm_core::Store::open(dtm_core::paths::Layout::new(root.path().to_path_buf())).unwrap();
+    let iid = "iid-remove-mcp";
+    let inst = fixture_inst(iid, root.path());
+    store.upsert_installation(inst.clone()).unwrap();
+    let mut map = store.load_managed_map().unwrap();
+    map.entries.push(ManagedEntry {
+        usage_key: "uk".into(),
+        installation_id: iid.into(),
+        config_path: root.path().join("cfg.json"),
+        server_name: "srv".into(),
+        original: LaunchSpec {
+            command: "orig".into(),
+            args: vec![],
+            env: Default::default(),
+            cwd: None,
+        },
+        config_sha256_at_write: "x".into(),
+        managed_at: chrono::Utc::now(),
+    });
+    store.save_managed_map(&map).unwrap();
+
+    // force なしは拒否
+    assert!(matches!(
+        dtm_core::ops::remove(&store, &inst, false),
+        Err(dtm_core::Error::Config(_))
+    ));
+    assert_eq!(store.load_registry().unwrap().installations.len(), 1);
+
+    // force ありは managed エントリを消して解除する (警告付き)
+    let o = dtm_core::ops::remove(&store, &inst, true).unwrap();
+    assert_eq!(o.removed_managed_entries, 1);
+    assert_eq!(o.warnings.len(), 1);
+    assert!(store.load_managed_map().unwrap().entries.is_empty());
+    assert!(store.load_registry().unwrap().installations.is_empty());
+}

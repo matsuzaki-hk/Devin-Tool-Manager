@@ -15,6 +15,7 @@ pub mod mcpcfg;
 pub mod models;
 pub mod ops;
 pub mod paths;
+pub mod probe;
 pub mod procutil;
 pub mod register;
 pub mod resolve;

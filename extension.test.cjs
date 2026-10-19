@@ -214,7 +214,7 @@ test("カタログ導入指定はDTMメタデータだけを保存し、解除�
   assert.equal(notifications[0].key, catalog.key("C:/config.json", "official"));
   await api.action(provider, { cmd: "set-catalog", id: "official", config: "C:/config.json" });
   assert.equal(saved.length, 0);
-  assert.ok(runtime.calls.every((args) => ["list", "scan", "managed", "logs"].includes(args[1])));
+  assert.ok(runtime.calls.every((args) => ["list", "scan", "managed", "logs", "probe-cache", "probe-mcp"].includes(args[1])));
 });
 
 test("CLIと共有するカタログ実体も全件確認から除外する", () => {
@@ -395,7 +395,7 @@ test("livestate: Devinログの初期化行とtools応答を対にし、URL失�
   const result = livestate.collect({ logsRoot, marker: null, servers });
   const byName = {};
   for (const [key, entry] of Object.entries(result.byKey)) byName[key.split("|")[1]] = entry;
-  assert.deepEqual(byName.good, { state: "connected", via: "agent", version: "1.2.3", tools: 3, error: null });
+  assert.deepEqual(byName.good, { state: "connected", via: "agent", version: "1.2.3", tools: 3, toolsVia: null, error: null });
   assert.equal(byName.extOnly.state, "connected"); assert.equal(byName.extOnly.via, "exthost");
   assert.equal(byName.broken.state, "error"); assert.equal(byName.broken.error, "spawn failed: ENOENT");
   assert.equal(byName.slow.state, "connecting");
@@ -416,6 +416,41 @@ test("livestate: markerがある場合はそのウィンドウだけを読み、
   assert.equal(merged.approx, true);
   const own = livestate.collect({ logsRoot, marker: "dtm-window-TEST", servers });
   assert.equal(own.approx, false);
+});
+
+test("livestate: 新形式ACPログ(1.126+)の接続状態とプローブキャッシュのツール数を併合する", (t) => {
+  // output_logging_*/N-Devin ACP devin-cli.log (toolbox形式・ISO T日付)。
+  // cutoff=output_dir生成時刻を通過するため ts は未来日付にする。
+  const T = "2099-10-19T00:08:00.000Z";
+  const acpLog = [
+    `${T}  INFO toolbox::tools::mcp: output_channel="MCP: good" server="good" Connecting to MCP server 'good'`,
+    `${T}  INFO toolbox::tools::mcp: output_channel="MCP: broken" server="broken" MCP server 'broken' connection failed: spawn failed: ENOENT`,
+    `2099-10-19T00:08:10.000Z  INFO toolbox::tools::mcp: output_channel="MCP: good" server="good" MCP server 'good' connected successfully`,
+    `2099-10-19T00:08:11.000Z  INFO toolbox::tools::mcp: output_channel="MCP: slow" server="slow" Connecting to MCP server 'slow'`,
+    // セッション実行ログ等の雑多な行は無視される
+    `2099-10-19T00:09:00.000Z  INFO toolbox::tools::exec::session_manager: session_id=x [create_session] creating PTY session`,
+  ].join("\n");
+  const logsRoot = fixtureLogs(t, { window1: {} });
+  const outDir = path.join(logsRoot, "20260101T000000", "window1", "exthost", "output_logging_20990101T000000");
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, "4-Devin ACP devin-cli.log"), acpLog);
+  const servers = ["good", "broken", "slow", "absent"].map((n) => ({ name: n, configPath: "C:\\cfg.json", kind: "McpStdio" }));
+  const probeCache = { entries: [
+    { serverName: "good", configPath: "C:\\cfg.json", tools: 7, serverVersion: "1.0.0", error: null },
+    { serverName: "broken", configPath: "C:\\cfg.json", tools: null, error: "timeout" },
+  ] };
+  // 実拡張は catalog.key (JSON配列+小文字パス) を渡す — その形式でも照合できることを検証
+  const catKey = (s) => JSON.stringify([String(s.configPath).replace(/\\/g, "/").toLowerCase(), s.name]);
+  const r = livestate.collect({ logsRoot, marker: null, servers, probeCache, keyOf: catKey });
+  const byName = {};
+  for (const [key, entry] of Object.entries(r.byKey)) byName[JSON.parse(key)[1]] = entry;
+  assert.equal(byName.good.state, "connected"); assert.equal(byName.good.via, "agent");
+  assert.equal(byName.good.tools, 7); assert.equal(byName.good.toolsVia, "probe");
+  assert.equal(byName.good.version, "1.0.0"); // probe の serverVersion を版補完に利用
+  assert.equal(byName.broken.state, "error"); assert.ok(byName.broken.error.includes("ENOENT"));
+  assert.equal(byName.broken.tools, null); // エラー記録はツール数に使わない
+  assert.equal(byName.slow.state, "connecting");
+  assert.equal(byName.absent.state, "unknown");
 });
 
 test("livestate: tools応答がINIT順と交差しても署名で正しく帰属し、曖昧な応答は帰属しない", (t) => {
