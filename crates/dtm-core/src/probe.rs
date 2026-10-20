@@ -102,8 +102,9 @@ fn fingerprint(launch: &LaunchSpec) -> String {
 }
 
 /// 実プローブ対象の起動指定を確定する。
-/// `dtm.exe launch mcpkey:<key>` 型は実体 exe+元引数へ解決する
+/// `dtm.exe launch mcpkey:<key>` 型は実起動形態 (コマンド+引数) へ解決する
 /// (dtm.exe 二段起動を避け、kill 時の孤児化を防ぐ)。
+/// インタプリタ+スクリプト型は世代内エントリポイント差し替え後の形態が返る。
 fn resolve_spawn(store: &Store, launch: &LaunchSpec) -> Result<SpawnSpec> {
     let is_launcher = launch.command.to_lowercase().contains("dtm.exe")
         && launch.args.first().map(|a| a == "launch").unwrap_or(false);
@@ -115,10 +116,32 @@ fn resolve_spawn(store: &Store, launch: &LaunchSpec) -> Result<SpawnSpec> {
                 .iter()
                 .find(|e| e.usage_key == key)
                 .ok_or_else(|| Error::NotFound(format!("mcpkey '{key}' の管理エントリが無い")))?;
-            let exe = launcher::resolve_path_only(store, &format!("mcpkey:{key}"))?;
+            // launcher と同じ解決 (世代差し替え込み)。世代未解決
+            // (管理化直後等) は元設定でプローブする。
+            let (prog, args) = match launcher::resolve_spawn_spec(
+                store,
+                &format!("mcpkey:{key}"),
+                &entry.original.args,
+            ) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    crate::dlogw!("probe: 世代解決失敗のため元設定でプローブ: {e}");
+                    (
+                        crate::resolve::resolve_spawn_command(&entry.original.command).ok_or_else(
+                            || {
+                                Error::NotFound(format!(
+                                    "コマンド '{}' を PATH 上に解決できません",
+                                    entry.original.command
+                                ))
+                            },
+                        )?,
+                        entry.original.args.clone(),
+                    )
+                }
+            };
             return Ok(SpawnSpec {
-                command: exe.display().to_string(),
-                args: entry.original.args.clone(),
+                command: prog.display().to_string(),
+                args,
                 env: launch.env.clone(),
                 cwd: launch.cwd.clone(),
             });
@@ -126,7 +149,7 @@ fn resolve_spawn(store: &Store, launch: &LaunchSpec) -> Result<SpawnSpec> {
     }
     // 裸コマンド名 (npx/uvx/node 等) は spawn が PATHEXT を適用しないため
     // PATH 解決して実パスで起動する (拡張子の優先順位 .exe > .cmd > .bat)
-    let command = match resolve_spawn_command(&launch.command) {
+    let command = match crate::resolve::resolve_spawn_command(&launch.command) {
         Some(p) => p.display().to_string(),
         None => {
             return Err(Error::NotFound(format!(
@@ -141,34 +164,6 @@ fn resolve_spawn(store: &Store, launch: &LaunchSpec) -> Result<SpawnSpec> {
         env: launch.env.clone(),
         cwd: launch.cwd.clone(),
     })
-}
-
-/// launch.command を実パスへ解決する。
-/// 絶対パス/パス区切りを含む相対パスはそのまま、裸コマンド名は PATH 検索。
-fn resolve_spawn_command(cmd: &str) -> Option<std::path::PathBuf> {
-    let p = Path::new(cmd);
-    if p.is_absolute() || cmd.contains(['\\', '/']) {
-        return p.exists().then(|| p.to_path_buf());
-    }
-    let mut all: Vec<std::path::PathBuf> = match which::which_all(cmd) {
-        Ok(iter) => iter.collect(),
-        Err(_) => vec![],
-    };
-    if all.is_empty() {
-        return None;
-    }
-    let rank = |p: &std::path::PathBuf| match p
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .as_deref()
-    {
-        Some("exe") => 0,
-        Some("cmd") => 1,
-        Some("bat") => 2,
-        _ => 3,
-    };
-    all.sort_by_key(rank);
-    all.into_iter().next()
 }
 
 struct SpawnSpec {

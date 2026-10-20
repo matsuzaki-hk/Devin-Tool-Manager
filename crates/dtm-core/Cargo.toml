@@ -11,6 +11,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "charset"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
+base64 = "0.22"
+sha1 = "0.10"
 semver = "1"
 sha2 = "0.10"
 globset = "0.4"

@@ -62,7 +62,19 @@ pub fn download(
     deadline: Instant,
     progress: Option<std::sync::Arc<crate::lock::Progress>>,
 ) -> Result<FetchOutcome> {
-    let http = client.http.clone();
+    download_http(&client.http, url, staging_dir, name, deadline, progress)
+}
+
+/// 任意 HTTP クライアントでのダウンロード (GitHub 以外のレジストリ等)。
+pub fn download_http(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    staging_dir: &Path,
+    name: &str,
+    deadline: Instant,
+    progress: Option<std::sync::Arc<crate::lock::Progress>>,
+) -> Result<FetchOutcome> {
+    let http = http.clone();
     let url = url.to_string();
     let staging_dir = staging_dir.to_path_buf();
     let name = name.to_string();

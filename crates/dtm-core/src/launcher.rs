@@ -83,10 +83,10 @@ pub fn launch(store: &Store, target_ref: &str, tool_args: &[String]) -> Result<E
     // ロック内: 起動ファイル解決 + spawn。
     // spawn 完了後にロックを解放しても、子プロセスは EXE の実行イメージを
     // OS が保持するため以後の差し替えは Windows のファイルロックで保護される。
-    let exe = resolve_entrypoint(store, &inst)?;
-    crate::dlog!("spawn: {}", exe.display());
-    let mut cmd = Command::new(&exe);
-    cmd.args(tool_args)
+    let (prog, args) = resolve_spawn_program_and_args(store, &inst, managed.as_ref(), tool_args)?;
+    crate::dlog!("spawn: {} {:?}", prog.display(), args);
+    let mut cmd = Command::new(&prog);
+    cmd.args(&args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -111,13 +111,55 @@ pub fn launch(store: &Store, target_ref: &str, tool_args: &[String]) -> Result<E
     }
     let mut child: Child = cmd
         .spawn()
-        .map_err(|e| Error::Other(format!("起動失敗 {}: {e}", exe.display())))?;
+        .map_err(|e| Error::Other(format!("起動失敗 {}: {e}", prog.display())))?;
     drop(lock); // spawn 完了でロック解放
     let status = child
         .wait()
-        .map_err(|e| Error::Other(format!("待機失敗 {}: {e}", exe.display())))?;
-    crate::dlog!("exit: {} code={:?}", exe.display(), status.code());
+        .map_err(|e| Error::Other(format!("待機失敗 {}: {e}", prog.display())))?;
+    crate::dlog!("exit: {} code={:?}", prog.display(), status.code());
     Ok(status)
+}
+
+/// 起動に使うコマンド実パスと引数を確定する。
+///
+/// インタプリタ+スクリプト形式 (managed.script_arg_index 有り):
+/// - program = インタプリタ実パス (original.command を絶対パス/PATH 解決)
+/// - args[i] = 世代内エントリポイント実パスへ差し替え (仕様 §9)。
+///   tool_args が index を含む長さなら tool_args 基準、短ければ
+///   original.args 基準で差し替える (CLI 直打ちの引数変更を尊重)。
+///
+/// それ以外: program = resolve_entrypoint の起動ファイル、args = tool_args。
+fn resolve_spawn_program_and_args(
+    store: &Store,
+    inst: &Installation,
+    managed: Option<&ManagedEntry>,
+    tool_args: &[String],
+) -> Result<(PathBuf, Vec<String>)> {
+    let entry = resolve_entrypoint(store, inst)?;
+    if let Some(m) = managed {
+        if let Some(i) = m.script_arg_index {
+            let interp =
+                crate::resolve::resolve_spawn_command(&m.original.command).ok_or_else(|| {
+                    Error::NotFound(format!(
+                        "インタプリタ '{}' を解決できません",
+                        m.original.command
+                    ))
+                })?;
+            let mut args = if i < tool_args.len() {
+                tool_args.to_vec()
+            } else if i < m.original.args.len() {
+                m.original.args.clone()
+            } else {
+                return Err(Error::Config(format!(
+                    "スクリプト引数位置 {i} が起動引数 ({}件) の範囲外です",
+                    tool_args.len()
+                )));
+            };
+            args[i] = entry.to_string_lossy().to_string();
+            return Ok((interp, args));
+        }
+    }
+    Ok((entry, tool_args.to_vec()))
 }
 
 /// 起動対象を解決する。利用元 (MCP 管理エントリ) があれば同時に返す。
@@ -268,6 +310,18 @@ fn resolve_entrypoint(store: &Store, inst: &Installation) -> Result<PathBuf> {
 pub fn resolve_path_only(store: &Store, target_ref: &str) -> Result<PathBuf> {
     let (inst, _m) = resolve_target(store, target_ref)?;
     resolve_entrypoint(store, &inst)
+}
+
+/// launch と同じ解決で (コマンド実パス, 引数) を返す (spawn しない)。
+/// 世代解決・インタプリタ差し替えを含む。適用 (pending apply) は行わない。
+/// probe-mcp 等が mcpkey: 管理化MCPの実起動形態を得るために使う。
+pub fn resolve_spawn_spec(
+    store: &Store,
+    target_ref: &str,
+    tool_args: &[String],
+) -> Result<(PathBuf, Vec<String>)> {
+    let (inst, managed) = resolve_target(store, target_ref)?;
+    resolve_spawn_program_and_args(store, &inst, managed.as_ref(), tool_args)
 }
 
 /// 版確認などに使う簡易実行 (非破壊的のみ)。

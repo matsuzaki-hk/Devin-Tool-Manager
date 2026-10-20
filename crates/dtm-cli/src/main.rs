@@ -224,6 +224,20 @@ enum Cmd {
         #[arg(long)]
         asset: Option<String>,
     },
+    /// npm レジストリ取得元を設定 (tarball 取得・世代管理。
+    /// PM 委譲の set-source/pkg: とは別経路)
+    SetNpmSource {
+        id: String,
+        /// npm パッケージ名 ("rea-agents", "@scope/name")
+        package: String,
+        /// レジストリ URL (省略時 https://registry.npmjs.org)
+        #[arg(long)]
+        registry: Option<String>,
+        /// 世代化後に世代ルートで実行するインストールコマンド
+        /// (繰り返し可。例: --install "npm install --omit=dev")
+        #[arg(long = "install")]
+        install_commands: Vec<String>,
+    },
     /// レシピを JSON で保存/表示
     Recipe {
         id: String,
@@ -479,6 +493,7 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
                     "sourceRepo": i.recipe.update_provider.as_ref().and_then(|p| match p {
                         dtm_core::models::UpdateProvider::GithubRelease(g) => Some(g.repository.clone()),
                         dtm_core::models::UpdateProvider::GitBuild(g) => Some(g.repository.clone()),
+                        dtm_core::models::UpdateProvider::NpmRegistry(n) => Some(format!("npm:{}", n.package)),
                         _ => None,
                     }).or_else(|| i.recipe.source_repository.clone()),
                     // set-source フォームの初期値用に現在のアセット条件も返す
@@ -497,6 +512,15 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
                         })),
                         _ => None,
                     }),
+                    // npm レジストリ取得元フォームの初期値用
+                    "npmSource": i.recipe.update_provider.as_ref().and_then(|p| match p {
+                        dtm_core::models::UpdateProvider::NpmRegistry(n) => Some(serde_json::json!({
+                            "package": n.package,
+                            "registry": n.registry,
+                            "install": n.install_commands.join("; "),
+                        })),
+                        _ => None,
+                    }),
                     "provider": match &i.recipe.update_provider {
                         Some(dtm_core::models::UpdateProvider::PackageManager { manager, package }) =>
                             Some(format!("pkg:{manager}:{package}")),
@@ -504,6 +528,8 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
                             Some(format!("github:{}", p.repository)),
                         Some(dtm_core::models::UpdateProvider::GitBuild(p)) =>
                             Some(format!("gitbuild:{}@{}", p.repository, p.branch)),
+                        Some(dtm_core::models::UpdateProvider::NpmRegistry(n)) =>
+                            Some(format!("npm:{}", n.package)),
                         Some(dtm_core::models::UpdateProvider::Manual) => Some("manual".into()),
                         None => None,
                     },
@@ -1134,6 +1160,42 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
                 asset.as_deref().unwrap_or("*.zip")
             );
             print_simple(json, &format!("更新元設定: {} → {repo}", inst.name))?;
+        }
+        Cmd::SetNpmSource {
+            id,
+            package,
+            registry,
+            install_commands,
+        } => {
+            let inst = store.find_installation(&id)?;
+            store.update_registry(|reg| {
+                let i = reg
+                    .installations
+                    .iter_mut()
+                    .find(|i| i.id == inst.id)
+                    .ok_or_else(|| dtm_core::Error::NotFound(inst.id.clone()))?;
+                i.recipe.update_provider = Some(UpdateProvider::NpmRegistry(NpmRegistryProvider {
+                    package: package.clone(),
+                    registry: registry.clone(),
+                    install_commands: install_commands.clone(),
+                    version_scheme: VersionScheme::Semver,
+                }));
+                // npm tarball は tar.gz — artifact.kind が他形式のままだと
+                // prepare で形式不一致になるため tar-gz に揃える
+                if let Some(a) = i.recipe.artifact.as_mut() {
+                    if a.kind != ArtifactKind::TarGz {
+                        a.kind = ArtifactKind::TarGz;
+                    }
+                }
+                Ok(())
+            })?;
+            dtm_core::dlog!(
+                "set-npm-source: {} → {} (registry: {})",
+                inst.name,
+                package,
+                registry.as_deref().unwrap_or("https://registry.npmjs.org")
+            );
+            print_simple(json, &format!("npm 取得元設定: {} → {package}", inst.name))?;
         }
         Cmd::SetGitSource {
             id,

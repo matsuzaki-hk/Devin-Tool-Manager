@@ -230,6 +230,16 @@ function argsFromFields(msg) {
       for (const c of cmds) args.push("--build", c);
       return args;
     }
+    case "set-npm-source": {
+      if (!f.package) return null;
+      const args = ["set-npm-source", msg.id, f.package];
+      if (f.registry) args.push("--registry", f.registry);
+      // 世代内インストールコマンドは ";" または改行区切りで複数指定
+      for (const c of (f.install || "").split(/[;\n]/).map((s) => s.trim()).filter(Boolean)) {
+        args.push("--install", c);
+      }
+      return args;
+    }
     case "import":
       return f.file && f.version
         ? ["import", msg.id, f.file, "--version", f.version]
@@ -250,7 +260,7 @@ function argsFromFields(msg) {
 async function action(provider, msg) {
   const key = `${msg.cmd}:${msg.id || msg.name || "-"}`;
   if (inFlight.has(key)) return; // 重複操作抑制
-  const mutations = ["prepare", "apply", "cancel", "rollback", "pm-sync", "set-source", "set-git-source", "import", "pin", "unpin", "manage", "register-mcp"];
+  const mutations = ["prepare", "apply", "cancel", "rollback", "pm-sync", "set-source", "set-git-source", "set-npm-source", "import", "pin", "unpin", "manage", "register-mcp"];
   const rows = catalog.build(lastState);
   if (msg.cmd === "set-catalog") {
     const row = rows.managed.concat(rows.unmanaged).find((entry) => entry.scan && !entry.scan.stale

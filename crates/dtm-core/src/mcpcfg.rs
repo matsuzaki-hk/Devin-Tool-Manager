@@ -69,12 +69,17 @@ pub fn manage(
         !(e.server_name == server_name
             && paths::path_key(&e.config_path) == paths::path_key(&cfg.path))
     });
+    // インタプリタ+スクリプト形式ではスクリプト引数の位置を記録し、
+    // ランチャーが世代内エントリポイントへの差し替えに使う (仕様 §9)。
+    // 元ファイルの存在を前提に管理化時点で確定させる。
+    let script_arg_index = crate::resolve::script_arg_index(original).map(|(i, _)| i);
     map.entries.push(ManagedEntry {
         usage_key: usage_key.clone(),
         installation_id: inst.id.clone(),
         config_path: cfg.path.clone(),
         server_name: server_name.into(),
         original: original.clone(),
+        script_arg_index,
         config_sha256_at_write: new_sha,
         managed_at: Utc::now(),
     });
@@ -329,6 +334,7 @@ mod enabled_tests {
                 env: Default::default(),
                 cwd: None,
             },
+            script_arg_index: None,
             config_sha256_at_write: hash,
             managed_at: Utc::now(),
         });
