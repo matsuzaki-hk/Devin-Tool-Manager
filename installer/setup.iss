@@ -103,7 +103,7 @@ var
   res: Integer;
 begin
   if CurStep = ssPostInstall then begin
-    ; DTM 自身を CLI ツール管理下に登録 (dtm init: 冪等・失敗しても導入は継続)
+    // DTM 自身を CLI ツール管理下に登録 (dtm init: 冪等・失敗しても導入は継続)
     Exec(ExpandConstant('{app}\dtm.exe'), 'init', '', SW_HIDE, ewWaitUntilTerminated, res);
     DevinCli := FindDevinCli();
     if DevinCli = '' then begin

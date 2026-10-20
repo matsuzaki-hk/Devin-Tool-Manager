@@ -411,11 +411,11 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
             let exe_dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let env = dtm_core::id::current_environment();
             let self_iid = dtm_core::id::installation_id(&exe_dir, &env);
-            let self_note = match store.find_installation(&self_iid) {
-                Ok(inst) if inst.recipe.update_provider.is_some() => "登録済み".to_string(),
+            let (self_note, self_inst) = match store.find_installation(&self_iid) {
+                Ok(inst) if inst.recipe.update_provider.is_some() => ("登録済み".to_string(), inst),
                 Ok(inst) => {
                     set_self_provider(&inst.id)?;
-                    "更新元を補完".to_string()
+                    ("更新元を補完".to_string(), inst)
                 }
                 Err(dtm_core::Error::NotFound(_)) => {
                     let (inst, _, _) = register::register_cli_tool(
@@ -425,11 +425,13 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
                         Some(format!("https://github.com/{SELF_REPO}")),
                     )?;
                     set_self_provider(&inst.id)?;
-                    let _ = ops::detect_current_version(store, &inst);
-                    "登録".to_string()
+                    ("登録".to_string(), inst)
                 }
                 Err(e) => return Err(e.into()),
             };
+            // 全パスで版検出を更新する — バイナリ差替後の init で
+            // 登録上の現在版が古いまま残らないようにする
+            let _ = ops::detect_current_version(store, &self_inst);
             dtm_core::dlog!("init: DTM 自己管理 = {} ({})", self_note, self_iid);
 
             if json {
