@@ -375,13 +375,78 @@ fn dispatch(store: &Store, cmd: Cmd, json: bool) -> Result<()> {
         Cmd::Init => {
             store.layout.ensure()?;
             std::fs::write(store.layout.root.join("dtm.root"), b"dtm root marker\n")?;
+
+            // DTM 自身を CLI ツール管理下に登録 (冪等)。
+            // 既登録なら更新元の欠落のみ補完し、それ以外は変更しない。
+            const SELF_REPO: &str = "matsuzaki-hk/Devin-Tool-Manager";
+            const SELF_ASSET: &str = "dtm-*-win-x64.zip";
+            let set_self_provider = |iid: &str| -> Result<()> {
+                store.update_registry(|reg| {
+                    let i = reg
+                        .installations
+                        .iter_mut()
+                        .find(|i| i.id == iid)
+                        .ok_or_else(|| dtm_core::Error::NotFound(iid.into()))?;
+                    i.recipe.update_provider =
+                        Some(UpdateProvider::GithubRelease(GithubReleaseProvider {
+                            repository: SELF_REPO.into(),
+                            channel: ReleaseChannel::Stable,
+                            asset: AssetSelector {
+                                match_type: AssetMatchType::Glob,
+                                pattern: SELF_ASSET.into(),
+                                tag: None,
+                                platform: Some("windows".into()),
+                                architecture: Some("x64".into()),
+                            },
+                            version_scheme: VersionScheme::Semver,
+                        }));
+                    Ok(())
+                })?;
+                Ok(())
+            };
+
+            // 同一 install_root+env 由来の id で既登録判定する
+            // (別ツールを同名 "dtm" で登録していても誤認しない)。
+            let exe = std::env::current_exe()?;
+            let exe_dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let env = dtm_core::id::current_environment();
+            let self_iid = dtm_core::id::installation_id(&exe_dir, &env);
+            let self_note = match store.find_installation(&self_iid) {
+                Ok(inst) if inst.recipe.update_provider.is_some() => "登録済み".to_string(),
+                Ok(inst) => {
+                    set_self_provider(&inst.id)?;
+                    "更新元を補完".to_string()
+                }
+                Err(dtm_core::Error::NotFound(_)) => {
+                    let (inst, _, _) = register::register_cli_tool(
+                        store,
+                        "dtm",
+                        &exe.to_string_lossy(),
+                        Some(format!("https://github.com/{SELF_REPO}")),
+                    )?;
+                    set_self_provider(&inst.id)?;
+                    let _ = ops::detect_current_version(store, &inst);
+                    "登録".to_string()
+                }
+                Err(e) => return Err(e.into()),
+            };
+            dtm_core::dlog!("init: DTM 自己管理 = {} ({})", self_note, self_iid);
+
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"ok": true, "root": store.layout.root})
+                    serde_json::json!({
+                        "ok": true,
+                        "root": store.layout.root,
+                        "selfRegistered": self_note,
+                    })
                 );
             } else {
-                println!("初期化完了: {}", store.layout.root.display());
+                println!(
+                    "初期化完了: {} / DTM自己管理: {}",
+                    store.layout.root.display(),
+                    self_note
+                );
             }
         }
         Cmd::Scan {

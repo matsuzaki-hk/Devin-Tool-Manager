@@ -2,7 +2,7 @@
 ; ビルド: build.ps1 経由で ISCC 呼び出し。/D で版・payload を注入可能。
 
 #ifndef AppVersion
-  #define AppVersion "0.4.12"
+  #define AppVersion "0.5.0"
 #endif
 #ifndef VsixFile
   #define VsixFile "devin-tool-manager-" + AppVersion + ".vsix"
@@ -100,8 +100,11 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   vsix, msg: String;
+  res: Integer;
 begin
   if CurStep = ssPostInstall then begin
+    ; DTM 自身を CLI ツール管理下に登録 (dtm init: 冪等・失敗しても導入は継続)
+    Exec(ExpandConstant('{app}\dtm.exe'), 'init', '', SW_HIDE, ewWaitUntilTerminated, res);
     DevinCli := FindDevinCli();
     if DevinCli = '' then begin
       msg := 'dtm.exe の配備は完了しましたが、Devin CLI ' +

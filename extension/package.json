@@ -2,12 +2,14 @@
   "name": "devin-tool-manager",
   "displayName": "Devin Tool Manager",
   "description": "MCP サーバーと CLI ツールの更新管理 (dtm.exe の Webview UI)",
-  "version": "0.4.12",
+  "version": "0.5.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onStartupFinished",
     "onView:dtm.manager"
@@ -64,7 +66,9 @@
         },
         "dtm.projectDirs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "開いているワークスペースに追加して読むプロジェクトルート。ユーザー設定も読み取ります。PC全体は探索しません。"
         }

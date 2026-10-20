@@ -43,6 +43,8 @@ DTM は **MCP サーバーや CLI ツールそのものではありません**�
 devin-desktop-next --install-extension .\devin-tool-manager-<版>.vsix
 ```
 
+インストーラーは DTM 自身を CLI ツールとしても登録します（`dtm init` と同等）。一覧に `dtm` が表示され、DTM 本体も GitHub Releases からの自己更新対象になります。zip で手動導入した場合は `dtm init` を一度実行してください。何度実行しても既存の登録を上書きしません。
+
 ## 例：日本語対応 Excel MCP を更新管理する
 
 ここでは [Excel MCP Server 日本語対応フォーク](https://github.com/matsuzaki-hk/excel-mcp-japanese-support) の **スタンドアロン Windows MCP Server** を例にします。Excel MCP の README では、Windows とデスクトップ版 Microsoft Excel 2016 以降が必要です。npm 版ではなく、実行ファイルを直接使う構成にすると、DTM から GitHub Releases の ZIP を使って更新できます。

@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "dtm-cli"
-version = "0.4.12"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "dtm-core"
-version = "0.4.12"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
