@@ -627,6 +627,7 @@ fn remove_refuses_managed_mcp_without_force() {
             env: Default::default(),
             cwd: None,
         },
+        script_arg_index: None,
         config_sha256_at_write: "x".into(),
         managed_at: chrono::Utc::now(),
     });
@@ -645,4 +646,183 @@ fn remove_refuses_managed_mcp_without_force() {
     assert_eq!(o.warnings.len(), 1);
     assert!(store.load_managed_map().unwrap().entries.is_empty());
     assert!(store.load_registry().unwrap().installations.is_empty());
+}
+
+// ---------- インタプリタ+スクリプト型の管理化 (仕様 §4.2, §9, §15-15) ----------
+
+/// node <存在する script> は受理、node 単体/スクリプト未存在は拒否。
+/// exe 直接起動は従来通り受理。
+#[test]
+fn manage_accepts_interpreter_with_script() {
+    use dtm_core::discover::{ConfigScope, McpServerEntry};
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("scripts").join("srv.mjs");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, b"// srv").unwrap();
+    let mk = |cmd: &str, args: Vec<String>| McpServerEntry {
+        scope: ConfigScope::User,
+        config_path: Path::new("C:/x/mcp_config.json").to_path_buf(),
+        name: "t".into(),
+        transport: "stdio".into(),
+        launch: Some(LaunchSpec {
+            command: cmd.into(),
+            args,
+            env: Default::default(),
+            cwd: None,
+        }),
+        url: None,
+        disabled: false,
+        extra_keys: vec![],
+    };
+    // スクリプト実在 → 受理
+    assert!(dtm_core::register::ensure_manageable(&mk(
+        "node",
+        vec![script.to_string_lossy().to_string(), "mcp".into()]
+    ))
+    .is_ok());
+    // node 単体 (引数なし) → 拒否
+    assert!(matches!(
+        dtm_core::register::ensure_manageable(&mk("node", vec![])),
+        Err(dtm_core::Error::NeedUser(_))
+    ));
+    // スクリプトが存在しない → 拒否
+    assert!(matches!(
+        dtm_core::register::ensure_manageable(&mk("node", vec!["missing.mjs".into()])),
+        Err(dtm_core::Error::NeedUser(_))
+    ));
+    // python + 存在するスクリプトも受理
+    let py = dir.path().join("srv.py");
+    std::fs::write(&py, b"pass").unwrap();
+    assert!(dtm_core::register::ensure_manageable(&mk(
+        "python",
+        vec![py.to_string_lossy().to_string()]
+    ))
+    .is_ok());
+}
+
+#[test]
+fn script_arg_index_finds_first_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("srv.mjs");
+    std::fs::write(&script, b"x").unwrap();
+    let launch = LaunchSpec {
+        command: "node".into(),
+        args: vec![script.to_string_lossy().to_string(), "mcp".into()],
+        env: Default::default(),
+        cwd: None,
+    };
+    let (i, p) = dtm_core::resolve::script_arg_index(&launch).unwrap();
+    assert_eq!(i, 0);
+    assert_eq!(p, script);
+    // インタプリタでなければ None
+    let mut not_interp = launch.clone();
+    not_interp.command = "tool.exe".into();
+    assert!(dtm_core::resolve::script_arg_index(&not_interp).is_none());
+}
+
+/// 世代内エントリポイントが args 内スクリプト位置へ差し替わる。
+/// tool_args 基準で index 置換、短い場合は original.args 基準。
+#[test]
+fn interpreter_launch_resolves_generation_entrypoint() {
+    let root = tempfile::tempdir().unwrap();
+    let store =
+        dtm_core::Store::open(dtm_core::paths::Layout::new(root.path().to_path_buf())).unwrap();
+    let iid = "iid-interp";
+    let mut inst = fixture_inst(iid, root.path());
+    // artifact: スクリプト型 (entrypoint=scripts/srv.mjs, versioned)
+    inst.recipe.artifact = Some(ArtifactSpec {
+        kind: ArtifactKind::TarGz,
+        root_pattern: Some("package".into()),
+        entrypoint: "scripts/srv.mjs".into(),
+        include: vec!["**/*".into()],
+        exclude: vec![],
+        data_priority: DataPriority::DataWins,
+    });
+    inst.kind = ToolKind::McpStdio;
+    inst.recipe.kind = ToolKind::McpStdio;
+    // 世代内にスクリプトを配置
+    let gen = "gen-1";
+    let gen_dir = root.path().join("generations").join(iid).join(gen);
+    std::fs::create_dir_all(gen_dir.join("scripts")).unwrap();
+    let gen_script = gen_dir.join("scripts").join("srv.mjs");
+    std::fs::write(&gen_script, b"// srv").unwrap();
+    store.upsert_installation(inst.clone()).unwrap();
+    store.set_active_generation(iid, gen).unwrap();
+
+    // 管理エントリ: original = node <old script> mcp、script_arg_index=0
+    let old_script = root.path().join("orig").join("srv.mjs");
+    std::fs::create_dir_all(old_script.parent().unwrap()).unwrap();
+    std::fs::write(&old_script, b"// old").unwrap();
+    let original_args = vec![old_script.to_string_lossy().to_string(), "mcp".into()];
+    let managed = ManagedEntry {
+        usage_key: "uk1".into(),
+        installation_id: iid.into(),
+        config_path: root.path().join("cfg.json"),
+        server_name: "srv".into(),
+        original: LaunchSpec {
+            command: "node".into(),
+            args: original_args.clone(),
+            env: Default::default(),
+            cwd: None,
+        },
+        script_arg_index: Some(0),
+        config_sha256_at_write: "x".into(),
+        managed_at: chrono::Utc::now(),
+    };
+    let mut map = store.load_managed_map().unwrap();
+    map.entries.push(managed);
+    store.save_managed_map(&map).unwrap();
+
+    // resolve_spawn_spec: program=node解決パス, args[0]=世代スクリプト
+    let (prog, args) =
+        dtm_core::launcher::resolve_spawn_spec(&store, "mcpkey:uk1", &original_args).unwrap();
+    assert!(prog
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("node"));
+    // Path 比較で区切り混在 (scripts/srv.mjs) を許容
+    assert_eq!(Path::new(&args[0]), gen_script.as_path());
+    assert_eq!(args[1], "mcp");
+
+    // 旧スクリプトパスは使われない
+    assert!(!args[0].contains("orig"));
+}
+
+// ---------- npm レジストリプロバイダー (仕様 §5.2) ----------
+// npm_select_version / verify_npm_integrity の単体テストは
+// ops.rs の #[cfg(test)] mod tests 内 (private 関数のため)。
+
+/// --version 出力後に終了しないサーバー型プロセスでも、
+/// タイムアウト時の捕捉出力から版を拾える (仕様 §6-6)。
+/// REA の rea.mjs --version と同型: 版を表示しつつイベントループが残る。
+#[test]
+#[cfg(windows)]
+fn probe_version_uses_captured_output_on_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    // 版を出力した後イベントループで終了しないスクリプト
+    let script = dir.path().join("srv.js");
+    std::fs::write(&script, "console.log('v7.8.9'); setInterval(()=>{},60000);").unwrap();
+    let spec = VerifySpec {
+        command: vec!["node".into(), "{entrypoint}".into(), "--version".into()],
+        version_regex: Some(r"(\d+\.\d+\.\d+)".into()),
+        allowed_exit_codes: vec![0],
+        timeout_secs: 3,
+    };
+    let ver = dtm_core::stage::probe_version(&script, &spec).unwrap();
+    assert_eq!(ver.as_deref(), Some("7.8.9"));
+
+    // 版出力が無く単にハングする場合は従来通りタイムアウト失敗
+    let silent = dir.path().join("silent.js");
+    std::fs::write(&silent, "setInterval(()=>{},60000);").unwrap();
+    let spec2 = VerifySpec {
+        command: vec!["node".into(), "{entrypoint}".into(), "--version".into()],
+        version_regex: Some(r"(\d+\.\d+\.\d+)".into()),
+        allowed_exit_codes: vec![0],
+        timeout_secs: 3,
+    };
+    assert!(matches!(
+        dtm_core::stage::probe_version(&silent, &spec2),
+        Err(dtm_core::Error::Verify(_))
+    ));
 }

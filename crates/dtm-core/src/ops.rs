@@ -243,6 +243,55 @@ fn check_inner(store: &Store, inst: &Installation) -> Result<CheckOutcome> {
                 reused: false,
             });
         }
+        Some(UpdateProvider::NpmRegistry(p)) => {
+            // npm レジストリ取得型: packument から dist-tags.latest (または版固定)
+            // の tarball を候補とする。PM 委譲とは別経路 (仕様 §5.2)。
+            let pin = recipe
+                .policy
+                .as_ref()
+                .and_then(|pp| pp.pinned_version.clone());
+            // ボディ読み取りのソケット停滞は deadline で遮断 (releases() と同型)
+            let base = npm_registry_base(p);
+            let package = p.package.clone();
+            let pack = fetch::bounded(
+                "npm packument 取得",
+                Instant::now() + Duration::from_secs(120),
+                move || npm_packument(&base, &package, Duration::from_secs(30)),
+            )?;
+            let sel = npm_select_version(p, &pack, pin.as_deref())?;
+            let candidate = Candidate {
+                version: sel.version.clone(),
+                tag: sel.version.clone(),
+                release_url: sel.tarball.clone(),
+                asset_name: sel.tarball.rsplit('/').next().map(String::from),
+                asset_url: Some(sel.tarball.clone()),
+                incomparable: false,
+            };
+            st.last_checked = Some(Utc::now());
+            st.latest_candidate = Some(candidate.clone());
+            match &st.current_version {
+                None => {
+                    st.status = Some(Status::Available);
+                }
+                Some(cur) => match version::compare(p.version_scheme, cur, &candidate.version) {
+                    CompareResult::Newer => st.status = Some(Status::Available),
+                    CompareResult::Equal | CompareResult::Older => {
+                        st.status = Some(Status::UpToDate)
+                    }
+                    CompareResult::Incomparable => {
+                        st.status = Some(Status::Available);
+                        st.latest_candidate.as_mut().unwrap().incomparable = true;
+                    }
+                },
+            }
+            st.last_error = None;
+            store.save_state(&inst.id, &st)?;
+            return Ok(CheckOutcome {
+                status: st.status.unwrap_or(Status::Available),
+                candidate: Some(candidate),
+                reused: false,
+            });
+        }
         Some(UpdateProvider::GithubRelease(p)) => p.clone(),
     };
 
@@ -486,10 +535,67 @@ fn prepare_inner(
                     return Err(e);
                 }
             },
+            Some(UpdateProvider::NpmRegistry(p)) => {
+                progress.phase("release");
+                let base = npm_registry_base(p);
+                let package = p.package.clone();
+                let pack = match fetch::bounded("npm packument 取得", deadline, move || {
+                    npm_packument(&base, &package, Duration::from_secs(30))
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        cleanup(&staging);
+                        return Err(e);
+                    }
+                };
+                check_deadline(deadline)?;
+                let pin = recipe
+                    .policy
+                    .as_ref()
+                    .and_then(|pp| pp.pinned_version.clone());
+                let sel = match npm_select_version(p, &pack, pin.as_deref()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        cleanup(&staging);
+                        return Err(e);
+                    }
+                };
+                let name = sel
+                    .tarball
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("package.tgz")
+                    .to_string();
+                let http = npm_http_client()?;
+                let mut o = fetch::download_http(
+                    &http,
+                    &sel.tarball,
+                    &staging,
+                    &name,
+                    deadline,
+                    Some(progress.clone()),
+                )?;
+                check_deadline(deadline)?;
+                progress.phase("verify");
+                if let Err(e) =
+                    verify_npm_integrity(&mut o, sel.integrity.as_deref(), sel.shasum.as_deref())
+                {
+                    cleanup(&staging);
+                    return Err(e);
+                }
+                (
+                    o,
+                    sel.version,
+                    "npm-registry".to_string(),
+                    Some(sel.tarball),
+                    Some(name),
+                )
+            }
             _ => {
                 cleanup(&staging);
                 return Err(Error::Config(
-                    "github-release / git-build プロバイダー未設定 (import を使用)".into(),
+                    "github-release / git-build / npm-registry プロバイダー未設定 (import を使用)"
+                        .into(),
                 ));
             }
         },
@@ -530,6 +636,20 @@ fn prepare_inner(
             zipx::extract(&outcome.file, &extract_root, &zipx::ZipLimits::default())?;
             None
         }
+        ArtifactKind::TarGz => {
+            if !crate::tarx::is_targz(&outcome.file) {
+                cleanup(&staging);
+                return Err(Error::Unsafe(
+                    "tar.gz として取得したが内容が tar.gz 形式ではありません (artifact.kind を確認してください)".into(),
+                ));
+            }
+            crate::tarx::extract(
+                &outcome.file,
+                &extract_root,
+                &crate::tarx::TarLimits::default(),
+            )?;
+            None
+        }
         ArtifactKind::Folder => {
             // ローカルフォルダ取込: outcome.file はフォルダ内ファイルではなく
             // import_local_file が返すコピー済みファイル。フォルダ指定は CLI が
@@ -559,6 +679,43 @@ fn prepare_inner(
         outcome.verification.clone(),
         &staging,
     )?;
+
+    // 世代内インストール手順 (npm tarball 等、実行時依存が成果物に
+    // 同梱されない場合の補助。git-build の buildCommands と同型で
+    // 世代ルートを cwd に順に実行する)
+    if let Some(UpdateProvider::NpmRegistry(p)) = &recipe.update_provider {
+        for cmdline in &p.install_commands {
+            crate::dlog!("npm-install: 実行 `{cmdline}` in {}", gen_dir.display());
+            let mut c = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+            if cfg!(windows) {
+                c.args(["/c", cmdline]);
+            } else {
+                c.args(["-c", cmdline]);
+            }
+            c.current_dir(&gen_dir);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let out = match run_with_timeout(c, remaining.min(Duration::from_secs(600)), cmdline) {
+                Ok(o) => o,
+                Err(e) => {
+                    store.push_event(&inst.id, "install-failed", &e.to_string());
+                    cleanup(&staging);
+                    return Err(e);
+                }
+            };
+            if !out.status.success() {
+                let tail = String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                let e = Error::Config(format!("インストールコマンド失敗 `{cmdline}`: {tail}"));
+                store.push_event(&inst.id, "install-failed", &e.to_string());
+                cleanup(&staging);
+                return Err(e);
+            }
+        }
+    }
 
     // 版確認 (仕様 §6-6: 登録された非破壊的確認のみ)
     progress.phase("probe");
@@ -1600,23 +1757,47 @@ fn run_with_timeout(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| Error::Config(format!("{desc} の起動失敗: {e}")))?;
+
+    // stdout/stderr は別スレッドで逐次回収する — 子がパイプ容量 (64KB)
+    // を超えて書き込むと、親が終了後に読む方式では子が書き込み
+    // ブロックして永久に終了せず、タイムアウトで強制終了されてしまう
+    // (install/build 系は出力が大きくなり得る)。
+    fn drain<R: Read + Send + 'static>(mut s: R) -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let out = buf.clone();
+        std::thread::spawn(move || {
+            let mut tmp = [0u8; 8192];
+            loop {
+                match s.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.lock().unwrap().extend_from_slice(&tmp[..n]),
+                }
+            }
+        });
+        buf
+    }
+    let stdout_buf = child
+        .stdout
+        .take()
+        .map(drain)
+        .unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    let stderr_buf = child
+        .stderr
+        .take()
+        .map(drain)
+        .unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
-                let mut so = Vec::new();
-                let mut se = Vec::new();
-                if let Some(mut o) = child.stdout.take() {
-                    let _ = o.read_to_end(&mut so);
-                }
-                if let Some(mut e) = child.stderr.take() {
-                    let _ = e.read_to_end(&mut se);
-                }
+                // ドレインスレッドの最終転送を拾うための短い猶予
+                std::thread::sleep(Duration::from_millis(50));
                 let status = child.wait()?;
                 return Ok(std::process::Output {
                     status,
-                    stdout: so,
-                    stderr: se,
+                    stdout: std::mem::take(&mut *stdout_buf.lock().unwrap()),
+                    stderr: std::mem::take(&mut *stderr_buf.lock().unwrap()),
                 });
             }
             Ok(None) => {
@@ -1763,6 +1944,156 @@ fn npm_cache_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("npm-cache")))?;
     dir.exists().then_some(dir)
+}
+
+// ---------- npm レジストリ取得プロバイダー (仕様 §5.2) ----------
+// PM ランチャー経由起動の委譲 (PackageManager) とは別経路。
+// `node script.mjs` 等ローカルファイル起動の実体を DTM 自身が取得・世代管理する。
+
+struct NpmSelected {
+    version: String,
+    tarball: String,
+    integrity: Option<String>,
+    shasum: Option<String>,
+}
+
+fn npm_registry_base(p: &NpmRegistryProvider) -> String {
+    p.registry
+        .clone()
+        .unwrap_or_else(|| "https://registry.npmjs.org".into())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn npm_http_client() -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent("dtm")
+        .build()?)
+}
+
+/// パッケージメタデータ (packument) を取得。
+/// `GET {registry}/{pkg}` — スコープ付きは `@scope%2Fname` 形式。
+fn npm_packument(base: &str, package: &str, timeout: Duration) -> Result<serde_json::Value> {
+    let url = format!("{}/{}", base, package.replace('/', "%2F"));
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("dtm")
+        .timeout(timeout)
+        .build()?;
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()?;
+    if !resp.status().is_success() {
+        return Err(Error::Config(format!(
+            "npm packument 取得失敗 {url}: HTTP {}",
+            resp.status()
+        )));
+    }
+    Ok(resp.json()?)
+}
+
+/// packument から取得対象版を選択する。
+/// pin 指定時はその版の存在を要求、未指定時は dist-tags.latest。
+fn npm_select_version(
+    p: &NpmRegistryProvider,
+    pack: &serde_json::Value,
+    pin: Option<&str>,
+) -> Result<NpmSelected> {
+    let versions = pack
+        .get("versions")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| Error::Config("npm packument に versions がありません".into()))?;
+    let ver = if let Some(pin) = pin {
+        if !versions.contains_key(pin) {
+            return Err(Error::NeedUser(format!(
+                "版固定 {pin} が {} のレジストリに存在しません",
+                p.package
+            )));
+        }
+        pin.to_string()
+    } else {
+        pack.pointer("/dist-tags/latest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Config("npm packument に dist-tags.latest がありません".into()))?
+            .to_string()
+    };
+    let v = versions
+        .get(&ver)
+        .ok_or_else(|| Error::Config(format!("npm {ver} が versions にありません")))?;
+    let tarball = v
+        .pointer("/dist/tarball")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| Error::Config(format!("npm {ver} に dist.tarball がありません")))?
+        .to_string();
+    Ok(NpmSelected {
+        version: ver,
+        tarball,
+        integrity: v
+            .pointer("/dist/integrity")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        shasum: v
+            .pointer("/dist/shasum")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+    })
+}
+
+/// npm dist の integrity (SSRI 形式 "sha512-<base64>") / shasum (sha1 hex) を検証。
+/// sha512 一致なら verified、sha1/shasum のみは sha1 実装で検証、
+/// どちらも無い・対応形式でない場合は unverified 記録 (成功扱いにしない)。
+fn verify_npm_integrity(
+    outcome: &mut fetch::FetchOutcome,
+    integrity: Option<&str>,
+    shasum: Option<&str>,
+) -> Result<()> {
+    if let Some(integ) = integrity {
+        for tok in integ.split_whitespace() {
+            if let Some(b64) = tok.strip_prefix("sha512-") {
+                use base64::Engine;
+                use sha2::Digest;
+                let digest = sha2::Sha512::digest(std::fs::read(&outcome.file)?);
+                let actual = base64::engine::general_purpose::STANDARD.encode(digest);
+                if actual == b64 {
+                    outcome.verification = VerificationResult {
+                        status: "verified".into(),
+                        method: Some("npm-integrity".into()),
+                        detail: Some(format!("sha512 integrity 一致 ({})", &b64[..16])),
+                    };
+                    return Ok(());
+                }
+                return Err(Error::Verify(format!(
+                    "npm integrity 不一致: 期待 sha512-{b64} / 実際 sha512-{actual}"
+                )));
+            }
+        }
+    }
+    if let Some(s1) = shasum {
+        let s1 = s1.trim().to_lowercase();
+        use sha1::Digest;
+        let digest = sha1::Sha1::digest(std::fs::read(&outcome.file)?);
+        let actual = digest
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<String>();
+        if actual == s1 {
+            outcome.verification = VerificationResult {
+                status: "verified".into(),
+                method: Some("npm-shasum".into()),
+                detail: Some(format!("sha1 shasum 一致 ({s1})")),
+            };
+            return Ok(());
+        }
+        return Err(Error::Verify(format!(
+            "npm shasum 不一致: 期待 {s1} / 実際 {actual}"
+        )));
+    }
+    outcome.verification = VerificationResult {
+        status: "unverified".into(),
+        method: None,
+        detail: Some("npm dist が integrity/shasum を提供していません".into()),
+    };
+    Ok(())
 }
 
 /// マネージャ別の委譲更新コマンドを構築。
@@ -1916,5 +2247,92 @@ mod tests {
             ..inst
         };
         assert!(enforce_pin_on_apply(&inst2, "2.0.0").is_ok());
+    }
+
+    // ---------- npm レジストリプロバイダー (仕様 §5.2) ----------
+
+    fn npm_packument() -> serde_json::Value {
+        serde_json::json!({
+            "name": "pkg-x",
+            "dist-tags": {"latest": "2.0.0", "beta": "2.1.0-beta.1"},
+            "versions": {
+                "1.0.0": {"dist": {"tarball": "https://r/x-1.0.0.tgz", "integrity": "sha512-a", "shasum": "s1"}},
+                "2.0.0": {"dist": {"tarball": "https://r/x-2.0.0.tgz", "integrity": "sha512-b", "shasum": "s2"}},
+                "2.1.0-beta.1": {"dist": {"tarball": "https://r/x-2.1.0.tgz"}}
+            }
+        })
+    }
+
+    #[test]
+    fn npm_select_latest_and_pin() {
+        let p = NpmRegistryProvider {
+            package: "pkg-x".into(),
+            registry: None,
+            install_commands: vec![],
+            version_scheme: VersionScheme::Semver,
+        };
+        let pack = npm_packument();
+        // 最新版選択 (dist-tags.latest)
+        let sel = npm_select_version(&p, &pack, None).unwrap();
+        assert_eq!(sel.version, "2.0.0");
+        assert_eq!(sel.tarball, "https://r/x-2.0.0.tgz");
+        assert_eq!(sel.integrity.as_deref(), Some("sha512-b"));
+        // 版固定選択
+        let sel = npm_select_version(&p, &pack, Some("1.0.0")).unwrap();
+        assert_eq!(sel.version, "1.0.0");
+        // 存在しない固定版 → 拒否
+        assert!(matches!(
+            npm_select_version(&p, &pack, Some("9.9.9")),
+            Err(Error::NeedUser(_))
+        ));
+    }
+
+    #[test]
+    fn npm_integrity_sha512_and_shasum() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pkg.tgz");
+        let content = b"tarball payload";
+        std::fs::write(&file, content).unwrap();
+        use sha2::Digest;
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            sha2::Sha512::digest(content),
+        );
+        let mut outcome = fetch::FetchOutcome {
+            file: file.clone(),
+            sha256: "x".into(),
+            verification: VerificationResult {
+                status: "pending".into(),
+                method: None,
+                detail: None,
+            },
+        };
+        // sha512 integrity 一致 → verified
+        verify_npm_integrity(&mut outcome, Some(&format!("sha512-{b64}")), None).unwrap();
+        assert_eq!(outcome.verification.status, "verified");
+        // sha512 不一致 → Verify エラー
+        let bad = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            sha2::Sha512::digest(b"other"),
+        );
+        assert!(matches!(
+            verify_npm_integrity(&mut outcome, Some(&format!("sha512-{bad}")), None),
+            Err(Error::Verify(_))
+        ));
+        // shasum (sha1 hex) 一致 → verified
+        let s1 = sha1::Sha1::digest(content)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<String>();
+        verify_npm_integrity(&mut outcome, None, Some(&s1)).unwrap();
+        assert_eq!(outcome.verification.status, "verified");
+        // shasum 不一致 → Verify エラー
+        assert!(matches!(
+            verify_npm_integrity(&mut outcome, None, Some("deadbeef")),
+            Err(Error::Verify(_))
+        ));
+        // 両方なし → unverified 記録 (成功扱いにしない)
+        verify_npm_integrity(&mut outcome, None, None).unwrap();
+        assert_eq!(outcome.verification.status, "unverified");
     }
 }

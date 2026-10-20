@@ -21,6 +21,7 @@ pub mod register;
 pub mod resolve;
 pub mod stage;
 pub mod store;
+pub mod tarx;
 pub mod version;
 pub mod zipx;
 

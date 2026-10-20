@@ -172,6 +172,35 @@ fn extract_package_arg(manager: &str, args: &[String]) -> Option<String> {
     }
 }
 
+/// コマンド文字列を spawn 可能な実パスへ解決する。
+/// 絶対パス/パス区切りを含む相対パスは存在確認のみ、裸コマンド名は
+/// PATH 検索 (spawn は PATHEXT を適用しないため .exe>.cmd>.bat の優先順で選択)。
+pub fn resolve_spawn_command(cmd: &str) -> Option<PathBuf> {
+    let p = Path::new(cmd);
+    if p.is_absolute() || cmd.contains(['\\', '/']) {
+        return p.exists().then(|| p.to_path_buf());
+    }
+    let mut all: Vec<PathBuf> = match which::which_all(cmd) {
+        Ok(iter) => iter.collect(),
+        Err(_) => vec![],
+    };
+    if all.is_empty() {
+        return None;
+    }
+    let rank = |p: &PathBuf| match p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .as_deref()
+    {
+        Some("exe") => 0,
+        Some("cmd") => 1,
+        Some("bat") => 2,
+        _ => 3,
+    };
+    all.sort_by_key(rank);
+    all.into_iter().next()
+}
+
 /// `uv tool install` がシムを置くディレクトリ。
 /// UV_TOOL_BIN_DIR 優先、既定は %USERPROFILE%\.local\bin。
 pub fn uv_tool_bin_dir() -> Option<PathBuf> {
@@ -260,6 +289,14 @@ pub fn is_interpreter_command(cmd_name_lower: &str) -> bool {
 /// インタプリタ+ローカルファイル形式かを判定し、成果物ルートを推定する。
 /// 戻り値: スクリプト実パス (解決できた場合)
 pub fn interpret_local_script(launch: &LaunchSpec) -> Option<PathBuf> {
+    script_arg_index(launch).map(|(_, p)| p)
+}
+
+/// `interpret_local_script` と同じ判定で、スクリプト引数の
+/// args 内インデックスも返す。管理化時にこの index を記録し、
+/// ランチャーが世代内エントリポイントへの差し替え位置として使う。
+/// 戻り値: (args 内インデックス, スクリプト実パス)
+pub fn script_arg_index(launch: &LaunchSpec) -> Option<(usize, PathBuf)> {
     let name = Path::new(&launch.command)
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
@@ -269,7 +306,7 @@ pub fn interpret_local_script(launch: &LaunchSpec) -> Option<PathBuf> {
     }
     // 最初のローカルファイルらしき引数 (区切り or .js/.mjs/.py 拡張子)
     let cwd = launch.cwd.clone().unwrap_or_default();
-    for a in &launch.args {
+    for (i, a) in launch.args.iter().enumerate() {
         if a.starts_with('-') {
             continue;
         }
@@ -280,7 +317,7 @@ pub fn interpret_local_script(launch: &LaunchSpec) -> Option<PathBuf> {
             cwd.join(p)
         };
         if cand.exists() {
-            return Some(normalize_path(&cand));
+            return Some((i, normalize_path(&cand)));
         }
     }
     None

@@ -26,6 +26,11 @@ const FORMS = {
     { k: "build", p: "ビルドコマンド (; 区切り)", def: "npm ci; npm run build", tip: "準備時に作業ディレクトリで順に実行するコマンド。失敗すると準備全体が中断されます" },
     { k: "out", p: "成果物ディレクトリ (相対)", def: "dist", need: 1, tip: "ビルド結果が出力される、作業ディレクトリからの相対パス。この内容が世代として保存・適用されます" },
   ]},
+  "set-npm-source": { title: "npm 取得元設定", fields: [
+    { k: "package", p: "npm パッケージ名 (例: pkg-name, @scope/name)", need: 1, tip: "npm レジストリから公開 tarball を取得し世代管理します。PM 委譲 (npx 起動) とは別経路で、DTM が版・世代・復元を管理します" },
+    { k: "registry", p: "レジストリ URL (空=npmjs.org)", tip: "省略時 https://registry.npmjs.org。プライベートレジストリ利用時のみ指定" },
+    { k: "install", p: "世代内インストールコマンド (; 区切り)", tip: "npm tarball は node_modules を含みません。実行時依存があるパッケージは 'npm install --omit=dev --no-audit --no-fund' 等を指定 (世代ルートで実行)" },
+  ]},
   "import": { title: "手動取込", fields: [
     { k: "file", p: "成果物パス (ZIP/EXE)", need: 1, browse: "file", tip: "取得済みの成果物ファイル (ZIP/EXE) を指定" },
     { k: "version", p: "版 (例: 1.2.3)", need: 1, tip: "この取込内容の版識別子。履歴・復元での表示に使われます" },
@@ -178,7 +183,9 @@ document.addEventListener("click", (e) => {
             asset: inst.sourceAsset || "*.zip" }
         : cmd === "set-git-source" && inst && inst.gitSource
           ? inst.gitSource
-          : null;
+          : cmd === "set-npm-source" && inst && inst.npmSource
+            ? inst.npmSource
+            : null;
     formState = formState && formState.cmd === cmd && formState.id === id
       ? null : { cmd, id, values: prefill, result: null };
     openDetails.add(id); // フォームは詳細パネル内に表示
@@ -267,6 +274,7 @@ function instCard(i, embedded) {
           ? ""
           : btn("set-source", i.id, "更新元設定", { sec: 1, tip: "GitHub Releases の取得元を設定します" })
             + btn("set-git-source", i.id, "ビルド元設定", { sec: 1, tip: "git クローン+ローカルビルド型の更新元を設定します (リリース資産の無いソースツール向け)" })
+            + btn("set-npm-source", i.id, "npm 取得元設定", { sec: 1, tip: "npm レジストリから公開 tarball を取得する更新元を設定します (PM 委譲とは別経路)" })
             + btn("import", i.id, "手動取込", { sec: 1, tip: "手元の成果物 (ZIP/EXE) を世代として取り込み、適用を予約します" })
             + btn("preview", i.id, "配置プレビュー", { sec: 1, tip: "指定ファイルを仮に配置した場合の展開計画を試算します" })
             + (i.pinned ? btn("unpin", i.id, "版固定解除", { sec: 1 }) : btn("pin", i.id, "版固定", { sec: 1, tip: "指定版以外への更新を抑止します" }))

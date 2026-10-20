@@ -74,38 +74,36 @@ pub fn register_mcp_server(
                 None,
             )
         } else if let Some(script) = resolve::interpret_local_script(&launch) {
-            // node script.js 等 → スクリプトの親ディレクトリを管理単位に
-            let dir = script
+            // node script.mjs 等 → スクリプトから上方へパッケージマニフェスト
+            // (package.json / pyproject.toml 等) を探し、プロジェクトルートを推定。
+            // 見つからなければスクリプトの親ディレクトリをルートとする。
+            // 世代管理を既定とし、元の配置ディレクトリ (git checkout 等) を
+            // 成果物で上書きしない (仕様 §4.2)。配布単位はレシピで調整。
+            let project_root = script
                 .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf())
+                .and_then(find_package_root)
                 .unwrap_or_else(|| script.parent().unwrap_or(&script).to_path_buf());
-            // dist/index.js → ルートは dist ではなくプロジェクトルート想定だが、
-            // 配布単位はレシピで調整。初期はスクリプトの親dirをルートとする。
-            let root = script
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(dir.clone());
             let rel_entry = script
-                .strip_prefix(&root)
+                .strip_prefix(&project_root)
                 .unwrap_or(&script)
                 .to_string_lossy()
                 .replace('\\', "/");
             (
-                root,
+                project_root,
                 None, // ソースは利用者が設定 (§5: 推測しない)
                 Some(ArtifactSpec {
                     kind: ArtifactKind::Zip,
                     root_pattern: None,
                     entrypoint: rel_entry,
                     include: vec!["**/*".into()],
-                    exclude: vec![],
+                    // VCS メタは成果物ではないため世代から除外
+                    exclude: vec![".git/**".into()],
                     data_priority: DataPriority::DataWins,
                 }),
                 Some(InstallStrategy {
-                    strategy: StrategyKind::FixedPath,
+                    strategy: StrategyKind::Versioned,
                     apply_when: ApplyWhen::NextLaunch,
-                    fixed_path: Some(script.parent().unwrap().to_path_buf()),
+                    fixed_path: None,
                     keep_generations: 3,
                     max_generations_mib: 0,
                 }),
@@ -214,15 +212,41 @@ fn uv_shim_package(path: &Path) -> Option<String> {
     )
 }
 
+/// スクリプト配置ディレクトリから上方へパッケージマニフェストを探し、
+/// 最も近い祖先をプロジェクトルートとして返す。
+/// インタプリタ言語を問わない汎用マーカー (package.json, pyproject.toml,
+/// setup.py, Gemfile, Cargo.toml) を対象とし、最深5階層まで。
+/// 見つからなければ None (呼び出し側はスクリプト親dirへフォールバック)。
+fn find_package_root(dir: &Path) -> Option<PathBuf> {
+    const MARKERS: &[&str] = &[
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "Gemfile",
+        "Cargo.toml",
+    ];
+    let mut cur = Some(dir);
+    for _ in 0..5 {
+        let d = cur?;
+        if MARKERS.iter().any(|m| d.join(m).is_file()) {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    None
+}
+
 /// 管理化 (ランチャー経由への設定書き換え) が可能な起動形式か事前検査する。
 /// 一覧登録 (register_mcp_server) は実体把握のみで起動経路を変えないが、
 /// manage は `dtm launch` に差し替えるため、ランチャーが扱えない形式を拒否する:
 /// - パッケージマネージャ経由 (npx/uvx 等): 実体が管理下で artifact なし
-/// - インタプリタ+スクリプト (node/python 等): ランチャーはインタプリタ
-///   経由起動を未対応 (スクリプトを直接実行してしまう)
+/// - インタプリタ+スクリプト (node/python 等): スクリプト引数が解決できる
+///   もののみ受理 (ランチャーが世代内エントリポイントへ差し替えて起動)。
+///   インタプリタ単体起動 (スクリプト引数なし) は node.exe 自体の管理化に
+///   なるため拒否
 /// - 解決実体が .exe 以外: 直接起動できない形式
 ///
-/// いずれも第2段階のアダプター対象 (仕様 §9)。
+/// PM 委譲・インタプリタ単体・非 exe 形式は第2段階のアダプター対象 (仕様 §9)。
 pub fn ensure_manageable(entry: &McpServerEntry) -> Result<()> {
     let launch = entry.launch.as_ref().ok_or_else(|| {
         Error::Config(format!(
@@ -230,24 +254,36 @@ pub fn ensure_manageable(entry: &McpServerEntry) -> Result<()> {
             entry.name
         ))
     })?;
-    let resolved = resolve::resolve_command(launch)?;
-    if let Some(pm) = &resolved.package_manager {
-        return Err(Error::NeedUser(format!(
-            "'{}' は {} 管理下のため管理化できません (更新は各マネージャへ委譲。一覧登録のみ可)",
-            entry.name, pm.manager
-        )));
-    }
-    // インタプリタ系コマンド (node/python 等) は引数のスクリプト有無に
-    // 関わらず拒否する。スクリプトが未存在でも node.exe 自体の管理化に
-    // なってしまうため (ランチャーはインタプリタ経由起動を未対応)
+    // インタプリタ系コマンド (node/python 等): スクリプト引数があれば受理
+    // (世代内エントリポイント差し替え起動)。起動時はインタプリタを
+    // コマンド名のまま spawn するため実体解決は不要であり、PATH 上の
+    // 複数候補 (WindowsApps スタブ等) で解決エラーにしない。
+    // 引数なし/スクリプト未存在はインタプリタ自体の管理化になるため拒否。
     let cmd_name = Path::new(&launch.command)
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     if resolve::is_interpreter_command(&cmd_name) {
+        // bun はランタイム兼パッケージマネージャのため委譲判定を先に行う
+        if let Some(pm) = resolve::detect_manager(&launch.command, &launch.args) {
+            return Err(Error::NeedUser(format!(
+                "'{}' は {} 管理下のため管理化できません (更新は各マネージャへ委譲。一覧登録のみ可)",
+                entry.name, pm.manager
+            )));
+        }
+        return match resolve::interpret_local_script(launch) {
+            Some(_) => Ok(()),
+            None => Err(Error::NeedUser(format!(
+                "'{}' はインタプリタ起動ですがスクリプト引数を解決できません (script.mjs 等のローカルファイルが必要)",
+                entry.name
+            ))),
+        };
+    }
+    let resolved = resolve::resolve_command(launch)?;
+    if let Some(pm) = &resolved.package_manager {
         return Err(Error::NeedUser(format!(
-            "'{}' はインタプリタ+スクリプト形式のため管理化できません (アダプター未実装。一覧登録のみ可)",
-            entry.name
+            "'{}' は {} 管理下のため管理化できません (更新は各マネージャへ委譲。一覧登録のみ可)",
+            entry.name, pm.manager
         )));
     }
     // uv tool のシムは .exe だが uv 管理下のため拒否
@@ -663,7 +699,13 @@ fn manageability(
         })
         .unwrap_or_default();
     if resolve::is_interpreter_command(&cmd_name) {
-        return (false, Some("インタプリタ+スクリプト形式".into()));
+        return match e.launch.as_ref().and_then(resolve::interpret_local_script) {
+            Some(_) => (true, None),
+            None => (
+                false,
+                Some("インタプリタ起動 (スクリプト引数未解決)".into()),
+            ),
+        };
     }
     match resolved_exe {
         Some(p) if resolve::is_uv_tool_shim(p) => (

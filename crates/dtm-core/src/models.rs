@@ -63,6 +63,28 @@ pub enum UpdateProvider {
     },
     /// git 作業ツリー + ローカルビルド (リリース資産を持たないソース型ツール)
     GitBuild(GitBuildProvider),
+    /// npm 等のパッケージレジストリから公開 tarball を取得し世代管理する。
+    /// PM ランチャー経由起動の委譲 (PackageManager) とは別経路 — 起動形態が
+    /// ローカルファイルのもの (インタプリタ+スクリプト等) 向け。
+    NpmRegistry(NpmRegistryProvider),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NpmRegistryProvider {
+    /// パッケージ名 ("rea-agents", "@scope/name" 形式可)
+    pub package: String,
+    /// レジストリのベース URL (省略時 https://registry.npmjs.org)
+    #[serde(default)]
+    pub registry: Option<String>,
+    /// 世代化後に世代ルートで順に実行するインストールコマンド
+    /// (npm tarball は node_modules を含まないため、実行時依存が
+    /// あるパッケージは "npm install --omit=dev --no-audit --no-fund"
+    /// 等をここに設定する。git-build の buildCommands と同型)
+    #[serde(default)]
+    pub install_commands: Vec<String>,
+    #[serde(default)]
+    pub version_scheme: VersionScheme,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +201,8 @@ pub enum ArtifactKind {
     #[default]
     Exe,
     Zip,
+    /// gzip 圧縮 tar アーカイブ (npm tarball 等)
+    TarGz,
     /// ローカルフォルダ/手動成果物
     Folder,
 }
@@ -594,6 +618,11 @@ pub struct ManagedEntry {
     pub server_name: String,
     /// 管理化前の元起動設定(管理解除時の復元用。仕様 §13)
     pub original: LaunchSpec,
+    /// インタプリタ+スクリプト形式: original.args 内のスクリプト引数位置。
+    /// 管理化時に確定し、ランチャーがこの位置を世代内エントリポイントへ差し替える。
+    /// None = 従来形式 (EXE 直接起動)。後方互換のため serde default。
+    #[serde(default)]
+    pub script_arg_index: Option<usize>,
     /// 書き換え時点のファイル SHA-256 (競合検知用。仕様 §13)
     pub config_sha256_at_write: String,
     pub managed_at: DateTime<Utc>,

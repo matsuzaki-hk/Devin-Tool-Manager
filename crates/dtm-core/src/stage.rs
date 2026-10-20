@@ -306,17 +306,39 @@ pub fn probe_version(entrypoint: &Path, verify: &VerifySpec) -> Result<Option<St
         work_dir,
         Duration::from_secs(verify.timeout_secs),
     )?;
+    let text = format!("{}{}", output.stdout, output.stderr);
+    if output.timed_out {
+        // --version 出力後もイベントループを抜けないツール (MCP サーバー型)
+        // は kill までの捕捉出力に版情報が出ている場合がある。版が取れたら
+        // 「起動して版を出力した」証跡として採用する。
+        if let Some(ver) = extract_version_with(&verify.version_regex, &text) {
+            crate::dlogw!(
+                "版確認コマンドはタイムアウト ({} 秒) で kill したが版出力を捕捉: {}",
+                verify.timeout_secs,
+                ver
+            );
+            return Ok(Some(ver));
+        }
+        return Err(Error::Verify(format!(
+            "版確認コマンドがタイムアウト ({} 秒)",
+            verify.timeout_secs
+        )));
+    }
     if !verify.allowed_exit_codes.contains(&output.code) {
         return Err(Error::Verify(format!(
             "版確認コマンドが終了コード {} (許容: {:?})",
             output.code, verify.allowed_exit_codes
         )));
     }
-    let text = format!("{}{}", output.stdout, output.stderr);
-    let ver = if let Some(re) = &verify.version_regex {
+    Ok(extract_version_with(&verify.version_regex, &text))
+}
+
+/// verify の versionRegex (なければ先頭行) で出力から版を抽出する。
+fn extract_version_with(version_regex: &Option<String>, text: &str) -> Option<String> {
+    if let Some(re) = version_regex {
         regex::Regex::new(re)
             .ok()
-            .and_then(|r| r.captures(&text))
+            .and_then(|r| r.captures(text))
             .and_then(|c| c.get(1).or_else(|| c.get(0)))
             .map(|m| m.as_str().trim().to_string())
     } else {
@@ -326,8 +348,7 @@ pub fn probe_version(entrypoint: &Path, verify: &VerifySpec) -> Result<Option<St
         } else {
             Some(t.lines().next().unwrap_or("").trim().to_string())
         }
-    };
-    Ok(ver)
+    }
 }
 
 /// 版検出のフォールバックチェーン (ローカル実行ファイル向け)。
@@ -400,13 +421,40 @@ fn pe_file_version(_exe: &Path) -> Option<String> {
     None
 }
 
+/// パイプ読み取りスレッド: EOF/エラーまで共有バッファへ転送する。
+/// join しない (孫プロセスのハンドル継承で EOF が来ない可能性があるため)。
+fn spawn_drain<R: std::io::Read + Send + 'static>(
+    mut s: R,
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    std::thread::spawn(move || {
+        let mut tmp = [0u8; 8192];
+        loop {
+            match s.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.lock().unwrap().extend_from_slice(&tmp[..n]),
+            }
+        }
+    });
+}
+
 pub struct RunOutput {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// タイムアウトで kill した場合 true。
+    /// その場合 code は -1 (子は終了していない) で、
+    /// stdout/stderr には kill までに捕捉済みの出力が入る。
+    pub timed_out: bool,
 }
 
 /// タイムアウト付き実行 (stdio はパイプで回収。管理ログ混入なし)
+///
+/// stdout/stderr は並行スレッドで逐次回収する — 子がパイプ容量を
+/// 超えて書き込んでもブロックしない。タイムアウト時は子を kill し、
+/// それまでに捕捉した出力を `timed_out: true` で返す
+/// (--version 出力後にイベントループを抜けないサーバー型ツールでも
+/// 版情報を回収できるようにするため)。
 pub fn run_timeout(
     prog: &str,
     args: &[String],
@@ -422,33 +470,44 @@ pub fn run_timeout(
     crate::procutil::hide_window(&mut cmd);
     let mut child = cmd.spawn()?;
 
+    // 共有バッファへ並行ドレイン (join しない — 孫プロセスがハンドルを
+    // 継承していると EOF 待ちで永久ブロックし得るため、必要分だけ
+    // スナップショットする。スレッドはプロセス終了時に OS 回収)
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    if let Some(s) = child.stdout.take() {
+        spawn_drain(s, stdout_buf.clone());
+    }
+    if let Some(s) = child.stderr.take() {
+        spawn_drain(s, stderr_buf.clone());
+    }
+
+    let snapshot =
+        |buf: &std::sync::Mutex<Vec<u8>>| String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait()? {
             Some(status) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                use std::io::Read;
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
+                // パイプは子終了で閉じる — ドレイン完了のための短い猶予
+                std::thread::sleep(Duration::from_millis(50));
                 return Ok(RunOutput {
                     code: status.code().unwrap_or(-1),
-                    stdout,
-                    stderr,
+                    stdout: snapshot(&stdout_buf),
+                    stderr: snapshot(&stderr_buf),
+                    timed_out: false,
                 });
             }
             None => {
                 if std::time::Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(Error::Verify(format!(
-                        "版確認コマンドがタイムアウト ({} 秒)",
-                        timeout.as_secs()
-                    )));
+                    std::thread::sleep(Duration::from_millis(50));
+                    return Ok(RunOutput {
+                        code: -1,
+                        stdout: snapshot(&stdout_buf),
+                        stderr: snapshot(&stderr_buf),
+                        timed_out: true,
+                    });
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
